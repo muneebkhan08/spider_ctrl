@@ -43,6 +43,7 @@
 - [Real-World Use Cases](#-real-world-use-cases)
 - [Architecture](#-architecture)
 - [Pairing & Authentication](#-pairing--authentication)
+- [Granting Input Permission](#-granting-input-permission)
 - [Quick Start Guide](#-quick-start-guide)
 - [Detailed Installation Guide](#-detailed-installation-guide)
 - [Connecting Your Phone](#-connecting-your-phone)
@@ -54,7 +55,8 @@
 - [API Reference](#-api-reference)
 - [Project Structure](#-project-structure)
 - [Security Model](#-security-model)
-- [Testing](#-testing)
+- [Uninstalling](#-uninstalling)
+- [Testing & Self-Check](#-testing--self-check)
 - [Troubleshooting](#-troubleshooting)
 - [Development Guide](#-development-guide)
 - [Contributing](#-contributing)
@@ -414,11 +416,58 @@ in place. Requires Python 3.9+, Node 18+ and git.
 | --- | --- |
 | Pair a new device | Scan the QR, or enter the pairing code |
 | Unpair one device | Tap **forget this pc** in the app's connection panel |
-| Unpair *everything* | `POST /pair/rotate` from the PC, or delete `server/config/pairing.json` |
+| Unpair *everything* | `POST /pair/rotate` from the PC, or delete `server/config/pairing.json`. Devices that are connected right now are kicked immediately |
 
 The token lives in `server/config/pairing.json` (gitignored, `chmod 600` on
 POSIX). It is stripped from the phone's address bar immediately after it is
 stored, so it never lingers in history or screenshots.
+
+---
+
+## 👆 Granting Input Permission
+
+> [!IMPORTANT]
+> **macOS and Linux need one permission before the trackpad and keyboard do
+> anything.** Without it the phone still pairs and connects, every button still
+> lights up, and *nothing moves* — the OS discards the synthetic events and
+> pyautogui does not report an error.
+
+SPIDER_CTRL detects this now. The server prints a warning on startup and the
+phone shows an amber **INPUT BLOCKED ON THE PC** banner with the exact fix.
+
+### macOS
+
+1. **System Settings → Privacy & Security → Accessibility**
+2. Switch **ON** the app you start the server from — **Terminal**, **iTerm**,
+   or whichever app you launch it in
+3. **Quit the server and start it again** — the permission is only read when a
+   process starts
+
+> macOS grants Accessibility to the *responsible* process, which for a
+> command-line server is the terminal app, **not** the Python binary. Adding
+> `python3` alone usually will not work. If you launch the server some other
+> way (a LaunchAgent, a bundled app), add the interpreter the warning prints.
+
+Screen streaming additionally needs **Screen Recording** for the same app.
+
+### Linux
+
+pyautogui drives X11. A pure **Wayland** session blocks synthetic input
+outright — log into an Xorg session instead. The server reports this too.
+
+### Windows
+
+Nothing to grant. If the target window ignores input it is usually running
+elevated, so run the server as administrator too.
+
+### Checking it
+
+```bash
+curl -s http://localhost:8765/health | grep input_ok
+```
+
+`"input_ok": true` means the OS will accept input. The phone can also re-check
+from the banner without restarting anything.
 
 ---
 
@@ -511,6 +560,16 @@ chmod +x start-server.sh
 
 **Scan the QR with your phone's camera and open the link. That's it** — the QR
 carries the pairing token, so the phone pairs and connects in one step.
+
+> **First run on macOS or Linux?** Check everything is wired up before you
+> rely on it:
+>
+> ```bash
+> cd server && venv/bin/python selftest.py
+> ```
+>
+> Mouse and keyboard fail until you grant input permission — see
+> [Granting Input Permission](#-granting-input-permission).
 
 The setup screen also opens in your browser automatically, showing the same QR
 at a comfortable size.
@@ -904,6 +963,7 @@ All frames are JSON. Request-response pairing uses an optional `id` field.
 | `clipboard_get` | — | `{text}` |
 | `clipboard_set` | `{text}` | `{copied: true}` |
 | `system_info` | — | Host, OS, CPU, RAM, battery |
+| `input_status` | — | `{ok, reason, fix, binary, platform}` — whether the OS will accept synthetic input |
 
 </details>
 
@@ -911,10 +971,14 @@ All frames are JSON. Request-response pairing uses an optional `id` field.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Server status, IP, platform, active stream count |
+| `GET` | `/health` | Server status, IP, platform, active stream count, `input_ok` |
 | `GET` | `/pair` | **Loopback only.** Token, QR (SVG data URI), pairing code, address |
 | `POST` | `/pair/claim` | Trade a six-character code for the token — `{code}` → `{token, ip, port}` |
-| `POST` | `/pair/rotate` | **Loopback only.** New token; unpairs every device |
+| `GET` | `/uninstall/plan` | **Loopback only.** What deleting *this* install would remove, with sizes. Changes nothing |
+| `POST` | `/uninstall` | **Loopback only.** Deletes *this* install. Requires `{"confirm":"DELETE"}`; the server stops afterwards |
+| `GET` | `/uninstall/scan` | **Loopback only.** Every SPIDER_CTRL install found (default location + any `?path=`), each with the same shape as `/uninstall/plan` |
+| `POST` | `/uninstall/remove` | **Loopback only.** Deletes the install at `{"root": "...", "confirm": "DELETE"}`. Never stops the server unless `root` is its own tree |
+| `POST` | `/pair/rotate` | **Loopback only.** New token; unpairs every device and disconnects any that are live. Returns `{ok, url, disconnected}` |
 | `GET` | `/{path}` | Static frontend (SPA fallback to `index.html`) |
 
 **WebSocket auth:** connect to `ws://<host>:8765/ws?t=<token>`. A missing,
@@ -966,6 +1030,9 @@ test_mob_ctrl/
 │   │   └── components/
 │   │       ├── PCConnector.tsx      # Desktop setup: install + pairing QR
 │   │       ├── PairPrompt.tsx       # Phone: pairing-code entry
+│   │       ├── InputWarning.tsx     # Warns when the OS blocks input
+│   │       ├── UninstallPanel.tsx   # Danger zone: remove from this PC
+│   │       ├── OtherInstalls.tsx    # Find + remove any install on the machine
 │   │       ├── ConnectionBar.tsx    # Connect / redirect / status
 │   │       ├── Touchpad.tsx         # Multi-touch trackpad
 │   │       ├── Keyboard.tsx         # Text, keys, macros
@@ -984,10 +1051,14 @@ test_mob_ctrl/
 │
 ├── server/                          # FastAPI server (runs on the host)
 │   ├── server.py                    # App, WS endpoint, dispatch, UDP beacon
+│   ├── selftest.py                  # Health check for every subsystem
 │   ├── requirements.txt             # Python dependencies with platform markers
 │   ├── requirements-dev.txt         # pytest, for the test suite
 │   ├── tests/
-│   │   └── test_pairing.py          # Token, code and origin-policy tests
+│   │   ├── test_pairing.py          # Token, code and origin-policy tests
+│   │   ├── test_server_auth.py      # Route-level auth and revocation
+│   │   ├── test_permissions.py      # Input-permission detection
+│   │   └── test_uninstall.py        # Uninstall safety (mostly refusals)
 │   ├── controllers/
 │   │   ├── mouse.py                 # Move, click, scroll, drag
 │   │   ├── keyboard.py              # Keys, combos, text, unicode
@@ -1004,6 +1075,8 @@ test_mob_ctrl/
 │   │   └── system_info.py           # CPU, RAM, battery
 │   ├── utils/
 │   │   ├── pairing.py               # Tokens, pairing codes, origin policy, QR
+│   │   ├── permissions.py           # Can the OS actually accept input?
+│   │   ├── uninstall.py             # Removal planning + guards
 │   │   ├── network.py               # LAN IP detection
 │   │   └── ssl_cert.py              # Self-signed cert generator
 │   ├── config/                      # Pairing token — generated, gitignored
@@ -1058,7 +1131,7 @@ So treat the token like a password, and only pair devices you control.
 - The server binds `0.0.0.0` — the port is reachable from the whole subnet, even though connecting requires the token
 - Traffic is plaintext by default (enable TLS with `SPIDER_CTRL_TLS=1`)
 - The UDP beacon on 8766 advertises the server's presence to the subnet
-- There is no per-device revocation — rotating the token drops every device
+- There is no per-device revocation — rotating drops **every** device (connected ones are disconnected immediately) and they all have to pair again
 - There is no approval prompt on the PC; the token is the only gate
 
 ### Safe Networks
@@ -1091,10 +1164,48 @@ The repo's first commit included a self-signed `key.pem`. Those files are no lon
 
 ---
 
-## 🧪 Testing
+## 🧪 Testing & Self-Check
 
-The pairing layer decides who can drive your machine, so it ships with tests —
-mostly negative ones, because a regression there is a stranger getting a shell.
+### Is my install healthy?
+
+Run the self-test. It checks every subsystem and tells you exactly what to fix.
+
+```bash
+cd server
+venv/bin/python selftest.py
+```
+
+```text
+── Input control ───────────────────────────────────────
+  [PASS] Mouse control
+         cursor moved and was restored
+  [PASS] Keyboard control
+         same event path as the mouse — available
+```
+
+It is read-only apart from a one-pixel cursor nudge it puts straight back, and
+it exits non-zero on failure so you can gate a script with it. Checks:
+
+| Group | What it verifies |
+| --- | --- |
+| **Environment** | Python 3.9+, all 11 runtime packages, frontend actually built |
+| **Pairing** | Token creates, persists and verifies; code issues; QR renders both ways |
+| **Input control** | Moves the cursor and reads the position back — the real proof, not just the permission flag |
+| **Screen** | Captures a frame, and warns if it comes back blank (missing Screen Recording) |
+| **Media keys** | The platform's media-key mechanism is available (checked without firing a key) |
+| **Controllers** | `system_info`, `filesystem`, `processes`, `clipboard`, `volume`, `terminal` each respond |
+| **Network** | A real LAN address exists, and whether 8765 is free |
+
+> Run it once after installing, and again after granting input permission.
+> Mouse and keyboard are the two checks that fail on a fresh macOS install —
+> see [Granting Input Permission](#-granting-input-permission).
+
+### Automated tests
+
+The pairing and uninstall layers decide who can drive your machine and what
+gets deleted, so both ship with tests — mostly negative ones, because a
+regression there is a stranger getting a shell, or your source tree going in
+the bin.
 
 ```bash
 cd server
@@ -1102,21 +1213,154 @@ venv/bin/pip install -r requirements-dev.txt
 venv/bin/python -m pytest tests/ -v
 ```
 
-24 cases in [`tests/test_pairing.py`](server/tests/test_pairing.py) cover:
+**108 cases** across six files:
 
-| Area | Checks |
+| File | Cases | Covers |
+| --- | --- | --- |
+| [`test_pairing.py`](server/tests/test_pairing.py) | 24 | Token lifecycle and rotation; pairing codes (no ambiguous characters, dash/case tolerance, single use, expiry, destroyed after the attempt cap); origin policy — LAN, loopback and allowlisted origins pass, hostile sites, suffix look-alikes (`…vercel.app.evil.com`), other local ports and non-HTTP schemes are rejected; QR rendering |
+| [`test_server_auth.py`](server/tests/test_server_auth.py) | 23 | The routes actually apply the policy: `/pair` loopback-only and origin-gated, PNA preflight, code exchange, WebSocket auth, **an unpaired socket cannot run a command**, and rotation revoking a live connection |
+| [`test_permissions.py`](server/tests/test_permissions.py) | 14 | Input detection per platform, a blocked host reported with a fix, an unverifiable check not crying wolf, and a guard against reintroducing the prompt that once segfaulted the interpreter |
+| [`test_media.py`](server/tests/test_media.py) | 9 | The macOS/other-platform split for media keys, and that macOS never falls through to pyautogui — whose media keys are a silent no-op there |
+| [`test_selftest.py`](server/tests/test_selftest.py) | 5 | The diagnostic itself runs to completion, reports every group, leaves nothing in an unknown state, and never fails without saying why |
+| [`test_uninstall.py`](server/tests/test_uninstall.py) | 33 | Mostly refusals: a working copy's source survives, the home directory and filesystem root are rejected, targets outside the install root are skipped, every wrong spelling of the confirmation deletes nothing; plus multi-install discovery, deleting a foreign root never shuts this server down, and the psutil running-check degrades safely when it can't see a process |
+
+---
+
+## 🗑️ Uninstalling
+
+The desktop setup page has a **danger zone** at the bottom with two sections:
+removing *this* install, and finding every *other* one on the machine. Both
+work identically on Windows, macOS and Linux — the backend resolves the
+platform-specific paths, the UI just renders whatever it finds.
+
+### Remove this install
+
+Expand *// remove spider_ctrl from this pc*. It lists exactly what will be
+deleted, with sizes, and needs you to type `DELETE` before the button does
+anything. When it finishes, the server deletes its files and stops itself.
+
+It works in one of two modes, chosen automatically:
+
+| Mode | When | What goes |
+| --- | --- | --- |
+| **Full** | The tree was created by `install.sh` / `install.ps1` | The whole install directory |
+| **Artifacts** | Anything else — a git clone you work in | `venv`, `node_modules`, `.next`, `out`, `config`, `certs` only. **Your source is kept.** |
+
+The installers drop a `.spider-ctrl-install` marker, and only a tree carrying
+that marker is ever removed whole. A development checkout has no marker, so
+the uninstaller will not delete it even if you ask — it clears build output
+and the pairing token instead.
+
+### Find every install on this machine
+
+Expand *// find other installs on this machine*. This is for the case the
+first section doesn't cover: you ran `install.sh` / `install.ps1` more than
+once, or ran an older version that predates the safety marker, and a copy is
+just sitting on disk with nothing pointing at it.
+
+It scans the same default location both installers write to — same relative
+path on every OS, resolved through the account's home directory:
+
+| OS | Default location |
 | --- | --- |
-| **Token** | Length, stability across restarts, disk persistence, rotation invalidating the old value, rejection of empty/wrong input |
-| **Pairing code** | No ambiguous characters, dash/case tolerance, single use, expiry, destroyed after the attempt cap |
-| **Origin policy** | LAN, loopback and allowlisted origins pass; hostile sites, suffix look-alikes (`…vercel.app.evil.com`), other local ports and non-HTTP schemes are rejected |
-| **QR** | Both the terminal and SVG renderers produce output |
+| macOS / Linux | `~/.spider-ctrl` |
+| Windows | `%USERPROFILE%\.spider-ctrl` |
+
+Each result shows its size, mode, and a **RUNNING** badge if a server is
+currently live in that tree — checked cross-platform via `psutil` (process
+command lines and the socket listening on 8765), not `lsof`/`netstat`, so
+the same code runs everywhere. Expand a result to see exactly what it would
+remove, then confirm the same way as above. Deleting a *different* install
+never stops the server answering your request — only deleting your own tree
+does that.
+
+Used a custom `SPIDER_CTRL_HOME` at install time? It isn't recorded anywhere
+on disk, so the automatic scan can't find it — type the path into **Installed
+somewhere else? Check a specific path** and it's checked the same way.
+
+### From the command line
+
+**This install:**
+
+```bash
+curl -s http://localhost:8765/uninstall/plan             # see what would go
+curl -s -X POST http://localhost:8765/uninstall \
+     -H 'Content-Type: application/json' \
+     -d '{"confirm":"DELETE"}'                           # do it
+```
+
+**Every install on the machine:**
+
+```bash
+curl -s http://localhost:8765/uninstall/scan | python3 -m json.tool
+```
+
+**A specific one, or a custom path the default scan can't see:**
+
+```bash
+# macOS / Linux
+curl -s "http://localhost:8765/uninstall/scan?path=$HOME/.spider-ctrl"
+
+# Windows (PowerShell)
+curl.exe -s "http://localhost:8765/uninstall/scan?path=$env:USERPROFILE\.spider-ctrl"
+```
+
+```bash
+curl -s -X POST http://localhost:8765/uninstall/remove \
+     -H 'Content-Type: application/json' \
+     -d '{"root":"/path/from/the/scan/output","confirm":"DELETE"}'
+```
+
+All four are **loopback only** — a paired phone can enumerate or delete
+nothing on your PC.
+
+### If the server isn't running
+
+The endpoints above need a running server. Without one, use the same guard
+logic directly — this refuses a working copy's source exactly like the API
+does, so it's safe to point at your dev checkout by accident:
+
+```bash
+cd server && venv/bin/python -c "
+from utils import uninstall
+print(uninstall.execute('DELETE'))
+"
+```
+
+Or delete a known install location by hand once you're sure — the app has no
+way to protect you here, since it isn't running:
+
+```bash
+# macOS / Linux
+rm -rf ~/.spider-ctrl
+
+# Windows (PowerShell)
+Remove-Item -Recurse -Force "$env:USERPROFILE\.spider-ctrl"
+```
+
+### What it does not remove
+
+- **Firewall rules** — delete the *SPIDER_CTRL Server* rule by hand if you
+  added one (Windows Defender Firewall, or `ufw delete allow 8765/tcp`)
+- **Node and Python themselves** — they were on your machine already
+- **On Windows, the virtualenv of the install you're deleting from** — a
+  running server can't delete the files it's executing out of; the result
+  names the folder to remove by hand afterward. Removing a *different*,
+  non-running install has no such restriction.
 
 ---
 
 ## 🔧 Troubleshooting
 
+> **Start here:** `cd server && venv/bin/python selftest.py` names the broken
+> subsystem and the fix, which is faster than working through this table.
+
 | Symptom | Solution |
 | --- | --- |
+| **Connected, but the trackpad and keyboard do nothing** | The OS is blocking synthetic input. See [Granting Input Permission](#-granting-input-permission) — on macOS enable your **terminal app** under Accessibility and restart the server |
+| Keyboard shortcuts do nothing | Same cause as above — `key_combo` goes through the same blocked path |
+| Play/pause or track skip does nothing | Fixed for macOS in this version — it now posts `NSSystemDefined` events instead of pyautogui virtual keys, which macOS ignores. `stop` has no system-wide equivalent on macOS; use pause |
+| Mouse moves but shortcuts don't | Accessibility is granted; check the target app isn't running elevated (Windows) or capturing the shortcut itself |
 | Phone can't reach the server | Confirm both devices are on the same network, then check the firewall — this is nearly always the firewall |
 | `Connection failed` in the app | Is `server.py` running? Does `http://<ip>:8765/health` load in the phone's browser? |
 | Phone keeps asking to pair | The token was rejected — scan the QR again, or use a fresh pairing code from the PC |

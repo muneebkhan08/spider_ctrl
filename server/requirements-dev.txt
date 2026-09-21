@@ -1,1 +1,6 @@
 pytest>=8.0
+
+# TestClient (tests/test_server_auth.py) drives the app through httpx.
+# Pinned below 0.28: that release dropped the `app=` shortcut that the
+# Starlette version FastAPI 0.104 pins still relies on.
+httpx>=0.27,<0.28

@@ -1,0 +1,20 @@
+# Lines starting with '#' are comments.
+# Each line is a file pattern followed by one or more owners.
+# More info: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repository
+* @muneebkhan08
+
+# Sensitive security-critical components
+/server/ @muneebkhan08
+/server/utils/ @muneebkhan08
+/server/controllers/ @muneebkhan08
+/server/certs/ @muneebkhan08
+/server/config/ @muneebkhan08
+
+# Installer scripts (executed remotely via curl/irm)
+/frontend/public/install.sh @muneebkhan08
+/frontend/public/install.ps1 @muneebkhan08
+
+# CI/CD and repository workflows
+/.github/ @muneebkhan08

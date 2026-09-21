@@ -13,6 +13,8 @@ import {
   Download,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import UninstallPanel from "./UninstallPanel";
+import OtherInstalls from "./OtherInstalls";
 
 const SERVER_PORT = 8765;
 const POLL_INTERVAL = 2500;
@@ -434,6 +436,12 @@ export default function PCConnector({ onUseAsRemote }: { onUseAsRemote?: () => v
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* ── Danger zone ───────────────────── */}
+        <UninstallPanel />
+        <OtherInstalls
+          platform={info?.platform ?? (os === "windows" ? "Windows" : os === "mac" ? "Darwin" : "Linux")}
+        />
 
         {/* ── Footer note ───────────────────── */}
         <p className="mt-10 text-[9px] text-surface-700 leading-relaxed max-w-2xl">

@@ -18,6 +18,7 @@ system requires a paid service.
 - [Video channel](#video-channel)
 - [Discovery](#discovery)
 - [Deployment topology](#deployment-topology)
+- [Uninstalling](#uninstalling)
 - [Cost and licensing](#cost-and-licensing)
 - [Known limits](#known-limits)
 
@@ -135,6 +136,9 @@ the Python server hands out the files directly.
 | [`page.tsx`](frontend/app/page.tsx) | Picks connector vs. remote vs. pairing screen |
 | [`PCConnector.tsx`](frontend/app/components/PCConnector.tsx) | Desktop setup: probe loopback, show QR or install command |
 | [`PairPrompt.tsx`](frontend/app/components/PairPrompt.tsx) | Phone: six-character code entry |
+| [`InputWarning.tsx`](frontend/app/components/InputWarning.tsx) | Phone: warns when the OS is blocking mouse/keyboard input |
+| [`UninstallPanel.tsx`](frontend/app/components/UninstallPanel.tsx) | Desktop: danger zone for *this* install |
+| [`OtherInstalls.tsx`](frontend/app/components/OtherInstalls.tsx) | Desktop: find + remove any install on the machine |
 | [`useWebSocket.tsx`](frontend/app/hooks/useWebSocket.tsx) | Control channel, token storage, reconnect policy |
 | [`useWebRTC.tsx`](frontend/app/hooks/useWebRTC.tsx) | Video channel, signalling, stats |
 | [`ConnectionBar.tsx`](frontend/app/components/ConnectionBar.tsx) | Status, manual IP entry, unpair |
@@ -151,8 +155,11 @@ FastAPI on Uvicorn, single process, port 8765.
 | --- | --- |
 | [`server.py`](server/server.py) | App, middleware, routes, WS dispatch, UDP beacon |
 | [`utils/pairing.py`](server/utils/pairing.py) | Tokens, pairing codes, origin policy, QR rendering |
+| [`utils/permissions.py`](server/utils/permissions.py) | Detects whether the OS will accept synthetic input |
+| [`utils/uninstall.py`](server/utils/uninstall.py) | Removal planning, cross-platform install discovery, guards |
 | [`utils/network.py`](server/utils/network.py) | LAN IP detection |
 | [`utils/ssl_cert.py`](server/utils/ssl_cert.py) | Self-signed certs for opt-in TLS |
+| [`selftest.py`](server/selftest.py) | Health check for every subsystem, run standalone |
 | `controllers/*.py` | One module per capability |
 
 Controllers are plain classes with synchronous methods. `server.py` maps action
@@ -232,6 +239,20 @@ unpair               POST /pair/rotate  (loopback only)  → new token, all devi
 
 The token is stripped from the address bar with `history.replaceState` as soon
 as it is stored, so it does not linger in history, screenshots or shared links.
+
+### Rotation reaches devices that are already connected
+
+The token is only checked during the handshake, so rotating it would not by
+itself disturb a device that is *currently* connected — which is precisely the
+device you rotate to get rid of. The server therefore keeps a registry of live
+sockets and revokes them on rotate.
+
+Revocation is **signalled, not forced**: each handler races its next
+`receive_text()` against a revocation flag and closes itself when the flag is
+set. Closing a socket from the rotate handler while the socket's own task is
+parked in `receive_text()` deadlocks, so the owning task has to do it. The
+effect is immediate — connected devices drop with close code 1008 and land on
+the pairing screen.
 
 ---
 
@@ -382,6 +403,107 @@ the installer is a script rather than a signed binary.
 
 ---
 
+## Uninstalling
+
+The uninstaller's hard problem is not deleting things, it is telling an
+install apart from somebody's source checkout. Both are git repos with an
+identical layout, so nothing in the tree's own shape is a safe signal.
+
+The installers therefore write a `.spider-ctrl-install` marker, and that
+marker is the only thing that authorises removing a tree whole:
+
+| Marker | Mode | Effect |
+| --- | --- | --- |
+| present | `full` | The install directory is removed |
+| absent | `artifacts` | Only generated paths go; source is untouched |
+
+Layered on top:
+
+- **Loopback only.** None of `/uninstall/plan`, `/uninstall`, `/uninstall/scan`
+  or `/uninstall/remove` is reachable from a paired phone.
+- **An exact confirmation phrase** in the request body, not just a flag.
+- **Root sanity checks** that refuse the filesystem root, the home directory,
+  well-known user folders, paths shorter than three components, and any tree
+  without `server/server.py` — a backstop for a bug computing the root, and
+  the same file `find_installs()` requires, so a path either function accepts
+  means the same thing to both.
+- **Containment re-checked at delete time**, not only when the plan is built,
+  so a target that somehow escaped the root is skipped rather than removed.
+- **Failures reported, not raised.** A partial uninstall the user can finish
+  by hand beats an exception halfway through.
+
+Afterwards the server revokes every live socket and stops itself, one second
+later, so the response still reaches the browser — but only when the root
+being deleted is its own. See below.
+
+### Finding installs this account didn't tell it about
+
+`plan()` and `execute()` both take an explicit `root` now, defaulting to the
+running server's own tree (`install_root()`) so every existing call site keeps
+working unchanged. Passing a different root routes the identical guards at a
+different install entirely — which is what running install.sh twice, or
+running an older version that predates the marker, leaves behind: a tree on
+disk with nothing in the app pointing at it.
+
+`find_installs()` locates those trees:
+
+```
+self (install_root())
+  + Path.home() / ".spider-ctrl"      ← what both installers write to
+  + $SPIDER_CTRL_HOME, if set now     ← for *this* process only, see below
+  + any extra_roots the caller names  ← /uninstall/scan?path=...
+      ↓ dedupe, keep only paths with server/server.py
+      ↓ plan() each survivor
+  sorted: self first, then by size (biggest first)
+```
+
+Both installers resolve to the identical relative path — `.spider-ctrl` under
+the account's home directory — so a single `Path.home()` call finds it on
+Windows, macOS and Linux with no platform branch; the OS-specific part is
+already inside `Path.home()`. There is deliberately no filesystem-wide
+search: scanning every directory for something that merely *looks* like
+SPIDER_CTRL risks matching an unrelated project and is slow on a large disk.
+A custom `SPIDER_CTRL_HOME` set once, in a different shell or a past
+install, leaves no record anywhere the default scan looks — the desktop
+page's *check a specific path* box exists for exactly that gap, feeding a
+path straight to `/uninstall/scan?path=`.
+
+### Is a found install currently running?
+
+Checked with `psutil` rather than `lsof`/`netstat`, so the same code runs on
+every OS. Two independent signals, either is enough:
+
+1. Some process's command line runs a `server.py` that resolves under the
+   candidate root.
+2. Something is listening on 8765, and *that* process's executable or
+   working directory resolves under the root.
+
+Either check can raise `AccessDenied` on a locked-down system — SIP on
+macOS, another user's process on Linux, a restricted account on Windows —
+and that is treated as *unknown*, never as *not running*: a permission error
+must not make a live server look safe to delete out from under. The reverse
+gap — a process a permission check genuinely can't see — is why the delete
+itself still surfaces OS-level file-in-use errors in `failed` rather than
+trusting this signal alone.
+
+### Deleting a tree that isn't the one running
+
+`execute()` returns `self` (was the deleted root this process's own tree?)
+alongside `shutdown`, and `shutdown` is only ever true when `self` is. Without
+that distinction, a request to clean up a leftover install elsewhere on disk
+would kill the server answering the request — which is also the server the
+response has to travel back through. `/uninstall/remove` is the endpoint this
+matters for: it deletes whatever `root` the caller names, and the caller is
+very often *not* deleting the tree currently serving the request.
+
+`/uninstall/remove` does not keep its own allowlist of "known" roots to check
+the request against — an earlier version did, and it was a real bug: since
+`/uninstall/scan?path=` can surface a root outside the server's own default
+scan locations, cross-checking against that default scan rejected every
+custom path the scan itself had just found. `plan()`/`execute()` already
+apply the complete sanity check to whatever root is passed, so the endpoint
+just calls them directly; that check *is* the allowlist.
+
 ## Known limits
 
 **Same network only.** There is no relay. For off-LAN access, install Tailscale
@@ -397,12 +519,32 @@ origin, since those require a secure context. iOS "Add to Home Screen" still
 works.
 
 **The token is device-scoped, not user-scoped.** Anyone holding the phone holds
-the pairing. There is no per-device revocation — `/pair/rotate` drops every
-device at once.
+the pairing. Revocation is all-or-nothing: `/pair/rotate` immediately drops
+every connected device and invalidates every stored token, so the other devices
+have to pair again too.
 
 **No confirmation prompt on the PC.** Pairing is the only gate; once paired, a
 device can shut the machine down without further approval. An approval dialog on
 the host is the obvious next hardening step.
+
+**Media keys are not keyboard keys on macOS.** pyautogui maps `playpause`,
+`nexttrack` and `prevtrack` to `None` there, so pressing them posted nothing
+and reported success. The controller now posts `NSSystemDefined` events
+directly on macOS and keeps pyautogui elsewhere. macOS has no system-wide
+stop key, so `stop` reports that rather than claiming to have worked.
+
+**Input needs an OS permission that fails silently.** pyautogui does not raise
+when macOS or Wayland refuses synthetic events — it returns normally and
+nothing happens, so every control appears to work while doing nothing. The
+server checks `AXIsProcessTrusted` at boot and exposes an `input_status`
+action, and the UI shows a banner, but the permission itself can only be
+granted by hand. On macOS it belongs to the *responsible* process — the
+terminal app the server was launched from, not the Python binary — which is
+the part that most often trips people up.
+
+There is deliberately no in-app permission prompt: building the CFDictionary
+that `AXIsProcessTrustedWithOptions` needs through ctypes segfaulted the
+interpreter, and that call would have sat in the startup path.
 
 **DHCP can move the address.** The stored IP may go stale after a router
 restart; the app falls back to the pairing screen and the QR fixes it. Reserving

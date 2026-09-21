@@ -6,9 +6,19 @@ dist/
 venv/
 .venv/
 .env
+.env.*
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
 
-# ── Certificates ─────────────────────────────────────────────────────────
-# Generated per-machine by utils/ssl_cert.py. Never commit the key.
+# ── Certificates & Keys ──────────────────────────────────────────────────
+# Generated per-machine by utils/ssl_cert.py or developers. Never commit keys.
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
 server/certs/*.pem
 server/certs/*.key
 server/certs/cert_meta.json

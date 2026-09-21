@@ -16,6 +16,7 @@ import ProcessManager from "./components/ProcessManager";
 import FileBrowser from "./components/FileBrowser";
 import PCConnector from "./components/PCConnector";
 import PairPrompt from "./components/PairPrompt";
+import InputWarning from "./components/InputWarning";
 import {
   MousePointer2,
   Keyboard as KeyboardIcon,
@@ -83,6 +84,7 @@ function AppInner() {
 
         {/* Connection */}
         <ConnectionBar />
+        <InputWarning />
       </header>
 
       {/* ── Main Content ─────────────────── */}

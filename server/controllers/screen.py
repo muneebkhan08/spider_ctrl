@@ -167,7 +167,10 @@ class ScreenCaptureTrack(MediaStreamTrack):
 
     def _capture_loop(self) -> None:
         """Background thread: grabs screen → produces av.VideoFrame."""
-        with mss.mss() as sct:
+        # mss.mss() is a deprecated alias in mss 10+, and mss.MSS does not
+        # exist in the 9.x we still allow — pick whichever is there.
+        grabber = getattr(mss, "MSS", None) or mss.mss
+        with grabber() as sct:
             monitor = sct.monitors[1]  # Primary monitor
             logger.info(f"Capturing monitor: {monitor['width']}x{monitor['height']}")
 

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import socket
 import threading
 import time
@@ -33,7 +34,7 @@ from controllers.screen import ScreenController
 from controllers.terminal import TerminalController
 from controllers.processes import ProcessController
 from controllers.filesystem import FilesystemController
-from utils import pairing
+from utils import pairing, permissions, uninstall
 from utils.network import get_local_ip
 from utils.ssl_cert import ensure_ssl_certs
 
@@ -69,6 +70,7 @@ REMOTE_ORIGINS = [
 
 # Skip launching a browser on boot (headless boxes, service installs).
 NO_BROWSER = os.environ.get("SPIDER_CTRL_NO_BROWSER", "").lower() in ("1", "true", "yes")
+
 
 LOCAL_IP = get_local_ip()
 ALLOWED_ORIGINS = pairing.local_origins(SERVER_PORT, LOCAL_IP) + REMOTE_ORIGINS
@@ -133,6 +135,7 @@ HANDLERS = {
     "clipboard_set": clipboard.set_text,
     # System Info
     "system_info": system_info.get_info,
+    "input_status": lambda **_: permissions.input_status(),
     # Terminal
     "terminal_execute": terminal.execute,
     "terminal_cwd": terminal.get_cwd,
@@ -214,6 +217,22 @@ async def lifespan(app: FastAPI):
         print("\n  ⚠️  Frontend not built — run: cd frontend && npm run build")
     print("═" * 56 + "\n")
 
+    # Warn before anything else: without this permission the phone connects,
+    # every command returns ok, and nothing actually moves.
+    perms = permissions.input_status()
+    if not perms["ok"]:
+        print()
+        print("  " + "!" * 54)
+        print("  ⚠️  INPUT CONTROL IS BLOCKED — the trackpad and keyboard")
+        print("      will do nothing until this is fixed.")
+        print()
+        print(f"      {perms['reason']}")
+        if perms["fix"]:
+            for line in perms["fix"].splitlines():
+                print(f"      {line}")
+        print("  " + "!" * 54)
+        print()
+
     if has_frontend and not NO_BROWSER:
         # Opens the setup screen so the QR is on screen without the user
         # having to find the terminal. Never fatal — headless hosts just skip it.
@@ -275,10 +294,30 @@ async def health():
         "platform": platform.system(),
         "webrtc": True,
         "active_streams": screen.active_connections,
+        "input_ok": permissions.input_status()["ok"],
     }
 
 
 # ── Pairing ──────────────────────────────────────────────────────────────────
+
+# Every accepted, authenticated socket, mapped to a revocation flag. The token
+# is only checked at handshake time, so without this a rotation would not reach
+# a device that is already connected — exactly the device you are rotating to
+# get rid of.
+#
+# Revocation is signalled rather than performed here: closing a socket from
+# another task while its own handler is parked in receive_text() deadlocks, so
+# each handler watches its flag and closes itself.
+_live_sockets: dict[WebSocket, asyncio.Event] = {}
+
+
+def _revoke_all() -> int:
+    """Signal every live control socket to close. Returns how many were told."""
+    flags = list(_live_sockets.values())
+    for flag in flags:
+        flag.set()
+    return len(flags)
+
 
 def _loopback(request: Request) -> bool:
     """True when the request came from this machine."""
@@ -366,8 +405,133 @@ async def pair_rotate(request: Request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     token = pairing.rotate_token()
     pairing.pair_code.issue()
-    print("  🔄  Pairing token rotated — all devices unpaired")
-    return JSONResponse({"ok": True, "url": _pair_url(token)})
+    dropped = _revoke_all()
+    print(f"  🔄  Pairing token rotated — all devices unpaired ({dropped} dropped)")
+    return JSONResponse({"ok": True, "url": _pair_url(token), "disconnected": dropped})
+
+
+# ── Uninstall ────────────────────────────────────────────────────────────────
+
+@app.get("/uninstall/scan")
+async def uninstall_scan(request: Request):
+    """
+    Find every SPIDER_CTRL install on this machine, not just the one
+    answering this request.
+
+    Loopback only, same reasoning as /uninstall/plan: this enumerates and
+    can lead to deleting things elsewhere on disk, so a paired phone must
+    never reach it.
+
+    Optional repeated ?path= query params add specific directories to check
+    — for the case where install.sh ran with a custom SPIDER_CTRL_HOME that
+    left no record anywhere the default scan looks.
+    """
+    if not _loopback(request):
+        return JSONResponse({"error": "Only available on the host machine."}, status_code=403)
+    extra = request.query_params.getlist("path")
+    return JSONResponse({"installs": uninstall.find_installs(extra_roots=extra)})
+
+
+@app.get("/uninstall/plan")
+async def uninstall_plan(request: Request):
+    """
+    Describe what an uninstall would delete. Changes nothing.
+
+    Loopback only: this is a host-machine operation, and nothing reachable
+    from a paired phone should be able to enumerate — let alone remove — the
+    install.
+    """
+    if not _loopback(request):
+        return JSONResponse({"error": "Only available on the host machine."}, status_code=403)
+    return JSONResponse(uninstall.plan())
+
+
+@app.post("/uninstall")
+async def uninstall_run(request: Request):
+    """
+    Delete the install. Irreversible.
+
+    Requires the exact confirmation phrase in the body, on top of the loopback
+    check — a stray POST should not be able to wipe the machine's copy.
+    """
+    if not _loopback(request):
+        return JSONResponse({"error": "Only available on the host machine."}, status_code=403)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    result = uninstall.execute(str(body.get("confirm", "")))
+    if not result.get("ok") and "error" in result:
+        return JSONResponse(result, status_code=400)
+
+    freed = result.get("freed_bytes", 0) / 1e6
+    print(f"  🧹  Uninstalled — removed {len(result.get('removed', []))} item(s), {freed:.0f} MB")
+    for failure in result.get("failed", []):
+        print(f"      ⚠️  could not remove {failure['path']}: {failure['error']}")
+
+    if result.get("shutdown"):
+        _revoke_all()
+        # Give the response time to reach the browser before the process ends.
+        async def _stop():
+            await asyncio.sleep(1.0)
+            print("  👋  Server stopped after uninstall")
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        asyncio.create_task(_stop())
+
+    return JSONResponse(result)
+
+
+@app.post("/uninstall/remove")
+async def uninstall_remove(request: Request):
+    """
+    Delete a specific install found by /uninstall/scan. Irreversible.
+
+    Unlike /uninstall, `root` picks *which* tree — it must be a path
+    find_installs() actually reported, so this can never be pointed at an
+    arbitrary directory by a crafted request. Deleting a tree other than the
+    one currently running never shuts this server down; only /uninstall
+    (with no root, i.e. "delete myself") does that.
+    """
+    if not _loopback(request):
+        return JSONResponse({"error": "Only available on the host machine."}, status_code=403)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    requested = body.get("root")
+    if not requested:
+        return JSONResponse({"error": "Missing 'root'."}, status_code=400)
+
+    # No separate allowlist here — plan()/execute() apply the full sanity
+    # checks (server/server.py must exist, must not be home/root/shallow/a
+    # well-known folder, containment re-checked at delete time) to whatever
+    # root is passed. Requiring it to also appear in this process's OWN
+    # default scan would reject a path found only via /uninstall/scan?path=
+    # (a custom SPIDER_CTRL_HOME), which is the whole reason that exists.
+    result = uninstall.execute(str(body.get("confirm", "")), Path(requested))
+    if not result.get("ok") and "error" in result:
+        return JSONResponse(result, status_code=400)
+
+    freed = result.get("freed_bytes", 0) / 1e6
+    print(f"  🧹  Removed install at {requested} — "
+          f"{len(result.get('removed', []))} item(s), {freed:.0f} MB")
+    for failure in result.get("failed", []):
+        print(f"      ⚠️  could not remove {failure['path']}: {failure['error']}")
+
+    if result.get("shutdown"):
+        _revoke_all()
+        async def _stop():
+            await asyncio.sleep(1.0)
+            print("  👋  Server stopped after uninstall")
+            os.kill(os.getpid(), signal.SIGTERM)
+        asyncio.create_task(_stop())
+
+    return JSONResponse(result)
 
 
 # ── WebRTC Signaling Endpoints ───────────────────────────────────────────────
@@ -498,10 +662,27 @@ async def websocket_endpoint(ws: WebSocket):
         return
 
     print(f"  ✅  Client connected: {client.host}:{client.port}")
+    revoked = asyncio.Event()
+    _live_sockets[ws] = revoked
 
     try:
         while True:
-            raw = await ws.receive_text()
+            # Race the next message against revocation, so a rotation takes
+            # effect immediately instead of waiting for the client to speak.
+            recv = asyncio.create_task(ws.receive_text())
+            revoke = asyncio.create_task(revoked.wait())
+            done, pending = await asyncio.wait(
+                {recv, revoke}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+
+            if revoke in done:
+                print(f"  🔒  Revoked: {client.host}:{client.port}")
+                await ws.close(code=1008, reason="pairing rotated")
+                return
+
+            raw = recv.result()
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -537,6 +718,8 @@ async def websocket_endpoint(ws: WebSocket):
         print(f"  ❌  Client disconnected: {client.host}:{client.port}")
     except Exception as exc:
         print(f"  ⚠️  Error: {exc}")
+    finally:
+        _live_sockets.pop(ws, None)
 
 
 # ── Serve Frontend ───────────────────────────────────────────────────────────

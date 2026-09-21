@@ -41,6 +41,12 @@ if (Test-Path (Join-Path $Dest '.git')) {
   git clone --depth 1 --quiet $Repo $Dest
 }
 
+# ── Mark this tree as installer-created ─────────────────────────────────────
+# The uninstaller only removes a tree whole if it carries this marker, so a
+# developer's checkout can never be deleted by mistake.
+Set-Content -Path (Join-Path $Dest '.spider-ctrl-install') `
+  -Value 'Created by install.ps1. Safe for SPIDER_CTRL to remove on uninstall.'
+
 # ── Frontend ────────────────────────────────────────────────────────────────
 if (-not (Test-Path (Join-Path $Dest 'frontend\out\index.html'))) {
   Say 'Building the UI (first run only, ~1 min)'

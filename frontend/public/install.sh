@@ -43,6 +43,12 @@ else
   git clone --depth 1 --quiet "$REPO" "$DEST"
 fi
 
+# ── Mark this tree as installer-created ─────────────────────────────────────
+# The uninstaller only removes a tree whole if it carries this marker, so a
+# developer's checkout can never be deleted by mistake.
+printf 'Created by install.sh. Safe for SPIDER_CTRL to remove on uninstall.\n' \
+  > "$DEST/.spider-ctrl-install"
+
 # ── Frontend ────────────────────────────────────────────────────────────────
 if [ ! -f "$DEST/frontend/out/index.html" ]; then
   say "Building the UI (first run only, ~1 min)"
