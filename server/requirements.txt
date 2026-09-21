@@ -22,3 +22,7 @@ numpy>=1.24.0
 
 # ── TLS certificate generation (see utils/ssl_cert.py) ───────────────────
 cryptography>=41.0.0
+
+# ── Pairing QR codes (terminal ASCII + SVG for the setup screen) ─────────
+# Pure Python: the SVG factory is built in, so Pillow is not required.
+qrcode>=7.4

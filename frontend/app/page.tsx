@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { WebSocketProvider, useWebSocket } from "./hooks/useWebSocket";
 import { WebRTCProvider } from "./hooks/useWebRTC";
 import ConnectionBar from "./components/ConnectionBar";
@@ -14,6 +14,8 @@ import ScreenViewer from "./components/ScreenViewer";
 import RemoteTerminal from "./components/RemoteTerminal";
 import ProcessManager from "./components/ProcessManager";
 import FileBrowser from "./components/FileBrowser";
+import PCConnector from "./components/PCConnector";
+import PairPrompt from "./components/PairPrompt";
 import {
   MousePointer2,
   Keyboard as KeyboardIcon,
@@ -171,12 +173,67 @@ function AppInner() {
   );
 }
 
+// ── Desktop detection ────────────────────────────────────────────────────────
+/**
+ * Returns null until mounted, so the static export and the first client render
+ * agree before we branch on anything only the browser knows.
+ *
+ * Matched on capability rather than user agent: a fine pointer on a wide
+ * viewport is a PC being set up, a coarse one is a phone being used as the
+ * remote. Tablets land on the remote, which is the useful half for them.
+ */
+function useIsDesktop(): boolean | null {
+  const [isDesktop, setIsDesktop] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 900px) and (pointer: fine)");
+    const update = () => setIsDesktop(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+
+  return isDesktop;
+}
+
+// ── Boot placeholder ─────────────────────────────────────────────────────────
+function Booting() {
+  return (
+    <div className="flex items-center justify-center h-[100dvh]">
+      <div className="flex items-center gap-2.5 text-surface-600">
+        <div className="w-1.5 h-1.5 rounded-full bg-accent/60 animate-pulse" />
+        <span className="text-[10px] tracking-[0.2em] uppercase">
+          initializing
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── Shell ────────────────────────────────────────────────────────────────────
+/**
+ * Picks the screen for this device:
+ *   desktop  → set the PC up (install the server, show the pairing QR)
+ *   phone    → pair if needed, then the remote itself
+ */
+function Shell() {
+  const { needsPairing } = useWebSocket();
+  const isDesktop = useIsDesktop();
+  const [asRemote, setAsRemote] = useState(false);
+
+  if (isDesktop === null) return <Booting />;
+  if (isDesktop && !asRemote)
+    return <PCConnector onUseAsRemote={() => setAsRemote(true)} />;
+  if (needsPairing) return <PairPrompt />;
+  return <AppInner />;
+}
+
 // ── Root Page ────────────────────────────────────────────────────────────────
 export default function Home() {
   return (
     <WebSocketProvider>
       <WebRTCProvider>
-        <AppInner />
+        <Shell />
       </WebRTCProvider>
     </WebSocketProvider>
   );

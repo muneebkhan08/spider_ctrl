@@ -33,6 +33,7 @@ from controllers.screen import ScreenController
 from controllers.terminal import TerminalController
 from controllers.processes import ProcessController
 from controllers.filesystem import FilesystemController
+from utils import pairing
 from utils.network import get_local_ip
 from utils.ssl_cert import ensure_ssl_certs
 
@@ -52,6 +53,25 @@ FRONTEND_DIR = (Path(__file__).parent.parent / "frontend" / "out").resolve()
 
 # TLS opt-in: set SPIDER_CTRL_TLS=1 to serve over HTTPS/WSS
 ENABLE_TLS = os.environ.get("SPIDER_CTRL_TLS", "").lower() in ("1", "true", "yes")
+
+# Hosted copies of the UI allowed to talk to this server. The deployed site
+# only ever reads /pair over loopback to show a QR code — it never controls
+# the machine — but that response carries the pairing token, so the origin
+# list has to stay exact. Override with a comma-separated SPIDER_CTRL_ORIGINS.
+DEFAULT_REMOTE_ORIGINS = ["https://spider-ctrl.vercel.app"]
+REMOTE_ORIGINS = [
+    o.strip().rstrip("/")
+    for o in os.environ.get(
+        "SPIDER_CTRL_ORIGINS", ",".join(DEFAULT_REMOTE_ORIGINS)
+    ).split(",")
+    if o.strip()
+]
+
+# Skip launching a browser on boot (headless boxes, service installs).
+NO_BROWSER = os.environ.get("SPIDER_CTRL_NO_BROWSER", "").lower() in ("1", "true", "yes")
+
+LOCAL_IP = get_local_ip()
+ALLOWED_ORIGINS = pairing.local_origins(SERVER_PORT, LOCAL_IP) + REMOTE_ORIGINS
 
 
 # ── Controller Instances ─────────────────────────────────────────────────────
@@ -163,22 +183,50 @@ async def lifespan(app: FastAPI):
     # Start UDP discovery in a daemon thread
     t = threading.Thread(target=udp_broadcast_loop, daemon=True)
     t.start()
-    local_ip = get_local_ip()
+    local_ip = LOCAL_IP
     has_frontend = FRONTEND_DIR.exists()
     http_proto = "https" if ENABLE_TLS else "http"
     ws_proto = "wss" if ENABLE_TLS else "ws"
+
+    token = pairing.get_token()
+    code, _ = pairing.pair_code.current()
+    pair_url = _pair_url(token)
+    setup_url = f"{http_proto}://localhost:{SERVER_PORT}/"
+
     print("\n" + "═" * 56)
     print(f"  🖥️  {APP_NAME} v{PROTOCOL_VERSION}")
-    if has_frontend:
-        print(f"  🌐  Open on phone → {http_proto}://{local_ip}:{SERVER_PORT}")
-    else:
-        print(f"  ⚠️  Frontend not built — run: cd frontend && npm run build")
     print(f"  🔌  WebSocket  →  {ws_proto}://{local_ip}:{SERVER_PORT}/ws")
     print(f"  🎥  WebRTC     →  /webrtc/offer")
     print(f"  📡  UDP Disco   →  port {UDP_PORT}")
     print(f"  🔒  TLS         →  {'enabled' if ENABLE_TLS else 'disabled (set SPIDER_CTRL_TLS=1)'}")
     print(f"  💻  Platform    →  {platform.system()} {platform.release()}")
+    print("═" * 56)
+
+    if has_frontend:
+        qr = pairing.qr_ascii(pair_url)
+        if qr:
+            print("\n  📱  Scan this with your phone's camera:\n")
+            print(qr)
+        print(f"  🔗  Or open on phone →  {http_proto}://{local_ip}:{SERVER_PORT}")
+        print(f"  🔑  Pairing code     →  {pairing.format_code(code)}")
+        print(f"  🖥️  Setup screen     →  {setup_url}")
+    else:
+        print("\n  ⚠️  Frontend not built — run: cd frontend && npm run build")
     print("═" * 56 + "\n")
+
+    if has_frontend and not NO_BROWSER:
+        # Opens the setup screen so the QR is on screen without the user
+        # having to find the terminal. Never fatal — headless hosts just skip it.
+        def _open_setup():
+            time.sleep(1.0)
+            try:
+                import webbrowser
+                webbrowser.open(setup_url)
+            except Exception:
+                pass
+
+        threading.Thread(target=_open_setup, daemon=True).start()
+
     yield
     # Shutdown: clean up all WebRTC connections
     await screen.cleanup_all()
@@ -188,10 +236,33 @@ app = FastAPI(title=APP_NAME, version=PROTOCOL_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Registered after CORSMiddleware, so it wraps it and can annotate the
+# preflight response CORS generates.
+@app.middleware("http")
+async def private_network_access(request: Request, call_next):
+    """
+    Answer Chrome's Private Network Access preflight.
+
+    A public HTTPS page reaching a private address (the deployed site
+    probing http://127.0.0.1:8765/pair) is preflighted with
+    Access-Control-Request-Private-Network, and Chrome drops the response
+    unless we opt in explicitly. Only granted to origins already on the
+    CORS allowlist.
+    """
+    response = await call_next(request)
+    origin = request.headers.get("origin")
+    if (
+        origin in ALLOWED_ORIGINS
+        and request.headers.get("access-control-request-private-network") == "true"
+    ):
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
 
 
 @app.get("/health")
@@ -205,6 +276,98 @@ async def health():
         "webrtc": True,
         "active_streams": screen.active_connections,
     }
+
+
+# ── Pairing ──────────────────────────────────────────────────────────────────
+
+def _loopback(request: Request) -> bool:
+    """True when the request came from this machine."""
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _pair_url(token: str) -> str:
+    scheme = "https" if ENABLE_TLS else "http"
+    return f"{scheme}://{LOCAL_IP}:{SERVER_PORT}/?t={token}"
+
+
+@app.get("/pair")
+async def pair(request: Request):
+    """
+    Hand the pairing token to the setup screen, as a QR code and a URL.
+
+    Loopback only. Two separate locks guard this, because they stop different
+    attacks: the loopback check keeps other devices on the Wi-Fi from simply
+    asking for the token, and the CORS allowlist keeps a hostile site the user
+    happens to have open from reading the response — that request does come
+    from loopback, so the first check alone would let it through.
+    """
+    if not _loopback(request):
+        return JSONResponse(
+            {"error": "Pairing info is only available on the host machine."},
+            status_code=403,
+        )
+
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in ALLOWED_ORIGINS:
+        return JSONResponse({"error": "Origin not allowed."}, status_code=403)
+
+    token = pairing.get_token()
+    code, expires_in = pairing.pair_code.current()
+    url = _pair_url(token)
+
+    return JSONResponse({
+        "hostname": socket.gethostname(),
+        "ip": LOCAL_IP,
+        "port": SERVER_PORT,
+        "platform": platform.system(),
+        "version": PROTOCOL_VERSION,
+        "url": url,
+        "token": token,
+        "code": pairing.format_code(code),
+        "code_expires_in": expires_in,
+        "qr": pairing.qr_data_uri(url),
+    })
+
+
+@app.post("/pair/claim")
+async def pair_claim(request: Request):
+    """
+    Trade a six-character pairing code for the real token.
+
+    Reachable from the LAN — this is the path a phone takes when it can't scan
+    the QR. The code is short, so it carries its own defences: single use,
+    CODE_TTL expiry, and a hard attempt cap (see utils/pairing.py).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    if not pairing.pair_code.claim(body.get("code")):
+        return JSONResponse(
+            {"error": "Invalid or expired pairing code."},
+            status_code=403,
+        )
+
+    print("  🔑  Pairing code claimed — device paired")
+    return JSONResponse({
+        "token": pairing.get_token(),
+        "hostname": socket.gethostname(),
+        "ip": LOCAL_IP,
+        "port": SERVER_PORT,
+    })
+
+
+@app.post("/pair/rotate")
+async def pair_rotate(request: Request):
+    """Issue a new token, dropping every paired device. Loopback only."""
+    if not _loopback(request):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    token = pairing.rotate_token()
+    pairing.pair_code.issue()
+    print("  🔄  Pairing token rotated — all devices unpaired")
+    return JSONResponse({"ok": True, "url": _pair_url(token)})
 
 
 # ── WebRTC Signaling Endpoints ───────────────────────────────────────────────
@@ -308,8 +471,32 @@ async def webrtc_stats(connection_id: str):
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
+    # Browsers do not apply CORS to WebSocket handshakes, so without this any
+    # page the user has open could connect to ws://127.0.0.1:8765/ws and drive
+    # the machine through HANDLERS.
+    #
+    # The handshake is accepted before the check and then closed on failure,
+    # rather than refused outright: refusing pre-accept makes Starlette answer
+    # the upgrade with a plain HTTP 403, which reaches the browser as close
+    # code 1006 — indistinguishable from the server being down, so the client
+    # would retry a token that can never work. Accepting first delivers a real
+    # 1008, which tells it to stop and re-pair. Nothing is read from the socket
+    # before it closes, so no command can run.
     client = ws.client
+    origin = ws.headers.get("origin")
+    await ws.accept()
+
+    if not pairing.is_origin_allowed(origin, SERVER_PORT, set(REMOTE_ORIGINS)):
+        print(f"  🚫  Rejected handshake from disallowed origin: {origin}")
+        await ws.close(code=1008, reason="origin not allowed")
+        return
+
+    if not pairing.verify_token(ws.query_params.get("t")):
+        host = client.host if client else "?"
+        print(f"  🚫  Rejected unpaired client: {host}")
+        await ws.close(code=1008, reason="not paired")
+        return
+
     print(f"  ✅  Client connected: {client.host}:{client.port}")
 
     try:

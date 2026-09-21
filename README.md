@@ -42,6 +42,7 @@
 - [Live App Interface Gallery](#-live-app-interface-gallery)
 - [Real-World Use Cases](#-real-world-use-cases)
 - [Architecture](#-architecture)
+- [Pairing & Authentication](#-pairing--authentication)
 - [Quick Start Guide](#-quick-start-guide)
 - [Detailed Installation Guide](#-detailed-installation-guide)
 - [Connecting Your Phone](#-connecting-your-phone)
@@ -53,6 +54,7 @@
 - [API Reference](#-api-reference)
 - [Project Structure](#-project-structure)
 - [Security Model](#-security-model)
+- [Testing](#-testing)
 - [Troubleshooting](#-troubleshooting)
 - [Development Guide](#-development-guide)
 - [Contributing](#-contributing)
@@ -355,6 +357,69 @@ Run build commands, check logs, restart services, or browse project files from y
 
 The Python server both handles API requests AND serves the frontend as static files. A phone on the same network just browses to `http://<pc-ip>:8765` — nothing else to deploy.
 
+> 📐 **[ARCHITECTURE.md](ARCHITECTURE.md)** goes deeper: the browser rules that
+> shaped the design, why there is no cloud broker, the pairing threat model,
+> connection sequence diagrams, and the full cost/licence breakdown.
+
+---
+
+## 🔑 Pairing & Authentication
+
+Every device pairs **once**. Pairing hands the phone a 256-bit token that it
+stores and reuses, so this only happens the first time.
+
+### The flow
+
+```
+┌─ On the PC ────────────────────────────────────────────────┐
+│  1. Open the site (deployed, or http://localhost:8765)     │
+│  2. Not installed? Copy the one-line install command       │
+│  3. The server starts and the page shows a QR code         │
+└────────────────────────────────────────────────────────────┘
+                              │
+┌─ On the phone ─────────────────────────────────────────────┐
+│  4. Scan the QR with the camera, open the link             │
+│  5. Paired and connected — nothing typed                   │
+└────────────────────────────────────────────────────────────┘
+```
+
+The server prints the **same QR code in its terminal**, so the flow works even
+if the setup page can't reach the server (Safari blocks page→localhost requests).
+
+### No camera?
+
+Browse to the address the server printed and enter the six-character pairing
+code shown on the PC. The code **works once** and **expires after 10 minutes** —
+restart the server for a fresh one.
+
+### Install one-liners
+
+The connector page shows the right command for your OS:
+
+```powershell
+irm https://spider-ctrl.vercel.app/install.ps1 | iex
+```
+
+```bash
+curl -fsSL https://spider-ctrl.vercel.app/install.sh | sh
+```
+
+Each clones the repo to `~/.spider-ctrl`, builds the UI, creates the virtualenv,
+opens the firewall port where it can, and starts the server. Re-running updates
+in place. Requires Python 3.9+, Node 18+ and git.
+
+### Managing pairings
+
+| Task | How |
+| --- | --- |
+| Pair a new device | Scan the QR, or enter the pairing code |
+| Unpair one device | Tap **forget this pc** in the app's connection panel |
+| Unpair *everything* | `POST /pair/rotate` from the PC, or delete `server/config/pairing.json` |
+
+The token lives in `server/config/pairing.json` (gitignored, `chmod 600` on
+POSIX). It is stripped from the phone's address bar immediately after it is
+stored, so it never lingers in history or screenshots.
+
 ---
 
 ## 🚀 Quick Start Guide
@@ -421,16 +486,34 @@ chmod +x start-server.sh
 ```
 ════════════════════════════════════════════════════════
   🖥️  SPIDER_CTRL Server v1.0.0
-  🌐  Open on phone → http://192.168.1.42:8765
   🔌  WebSocket  →  ws://192.168.1.42:8765/ws
   🎥  WebRTC     →  /webrtc/offer
   📡  UDP Disco   →  port 8766
   🔒  TLS         →  disabled (set SPIDER_CTRL_TLS=1)
   💻  Platform    →  Windows 10
 ════════════════════════════════════════════════════════
+
+  📱  Scan this with your phone's camera:
+
+  █▀▀▀▀▀▀▀█▀█▀█▀▀▀▀█▀▀▀█▀▀▀███▀██▀▀▀▀▀▀▀█
+  █ █▀▀▀█ █▀█ ▄████▄▀█▄█▀ █▄ █▀██ █▀▀▀█ █
+  █ █   █ ██ ▄█▄█ ▄ ▀  ▄▄█▄▄ ▀█ █ █   █ █
+  █ ▀▀▀▀▀ █ █ █▀▄ ▄▀█▀█ ▄ █ ▄▀█▀█ ▀▀▀▀▀ █
+  █▀█▀███▀▀██▀▄▀███▀▀ ███▄▄▄██▀▀██▀██▀█▀█
+                  … (full QR) …
+  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+
+  🔗  Or open on phone →  http://192.168.1.42:8765
+  🔑  Pairing code     →  8PB-5P8
+  🖥️  Setup screen     →  http://localhost:8765/
+════════════════════════════════════════════════════════
 ```
 
-**Open that `http://…:8765` URL on your phone. That's it.**
+**Scan the QR with your phone's camera and open the link. That's it** — the QR
+carries the pairing token, so the phone pairs and connects in one step.
+
+The setup screen also opens in your browser automatically, showing the same QR
+at a comfortable size.
 
 ---
 
@@ -483,8 +566,13 @@ python server.py
 ### Step 5: Connect Your Phone
 
 1. Make sure your phone is on the **same Wi-Fi network** as your computer
-2. Open the URL shown in the terminal (e.g., `http://192.168.1.42:8765`)
-3. The app connects automatically — start controlling your PC!
+2. **Scan the QR code** the server prints on startup — the setup screen also
+   opens in your browser automatically with the same code
+3. That's it. The QR carries the pairing token, so the phone pairs and connects
+   in one step with nothing to type
+
+No camera? Open the address the server prints (e.g. `http://192.168.1.42:8765`)
+and enter the six-character pairing code shown on the PC.
 
 ### Updating
 
@@ -499,9 +587,20 @@ cd server && pip install -r requirements.txt && cd ..
 
 ## 📲 Connecting Your Phone
 
-### Method 1: Same Wi-Fi (Simplest)
+Every device has to **pair once** before it can control the PC. Pairing hands
+the phone a token that it stores and reuses, so this only happens the first time.
 
-Both devices on the same router. Browse to the IP the server printed.
+### Method 1: Scan the QR (Simplest)
+
+Both devices on the same router. Point the phone's camera at the QR code — in
+the server's terminal, or on the setup screen that opens at
+`http://localhost:8765`. Open the link and you're connected.
+
+### Method 1b: Pairing Code
+
+If the camera isn't an option, browse to the address the server printed and type
+the six-character code from the PC. The code works once and expires after ten
+minutes; restart the server for a fresh one.
 
 ### Method 2: PC as Hotspot
 
@@ -631,6 +730,13 @@ Constants at the top of `server/server.py`:
 | Variable | Values | Description |
 | --- | --- | --- |
 | `SPIDER_CTRL_TLS` | `1`, `true`, `yes` | Enable HTTPS/WSS with auto-generated self-signed certificates |
+| `SPIDER_CTRL_ORIGINS` | Comma-separated origins | Hosted copies of the UI allowed to read `/pair`. Default: `https://spider-ctrl.vercel.app` |
+| `SPIDER_CTRL_NO_BROWSER` | `1`, `true`, `yes` | Don't open the setup page on boot (headless / service installs) |
+
+> [!WARNING]
+> `SPIDER_CTRL_ORIGINS` is **exact match only** — set it to your real deployment
+> URL. The `/pair` response carries the pairing token, so a wildcard here would
+> let any site the user visits read it and take over the machine.
 
 ### Controller Configuration
 
@@ -640,6 +746,9 @@ Constants at the top of `server/server.py`:
 | `controllers/terminal.py` | `MAX_TIMEOUT` | 120s | Maximum allowed timeout |
 | `controllers/terminal.py` | `MAX_OUTPUT_BYTES` | 64 KB | Output cap per stream |
 | `controllers/screen.py` | `QUALITY_PRESETS` | see table above | WebRTC stream quality |
+| `utils/pairing.py` | `CODE_TTL` | 600s | Pairing-code lifetime |
+| `utils/pairing.py` | `CODE_MAX_ATTEMPTS` | 5 | Wrong guesses before the code is destroyed |
+| `utils/pairing.py` | `CODE_LENGTH` | 6 | Characters in the pairing code |
 
 ### Frontend Configuration
 
@@ -803,7 +912,14 @@ All frames are JSON. Request-response pairing uses an optional `id` field.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Server status, IP, platform, active stream count |
+| `GET` | `/pair` | **Loopback only.** Token, QR (SVG data URI), pairing code, address |
+| `POST` | `/pair/claim` | Trade a six-character code for the token — `{code}` → `{token, ip, port}` |
+| `POST` | `/pair/rotate` | **Loopback only.** New token; unpairs every device |
 | `GET` | `/{path}` | Static frontend (SPA fallback to `index.html`) |
+
+**WebSocket auth:** connect to `ws://<host>:8765/ws?t=<token>`. A missing,
+wrong or rotated token is closed with code **1008** — distinct from a dropped
+connection, so the client knows to re-pair instead of retrying forever.
 
 ### WebRTC Signalling API
 
@@ -848,6 +964,8 @@ test_mob_ctrl/
 │   │   │   ├── useWebSocket.tsx     # Control channel, reconnect, req/res
 │   │   │   └── useWebRTC.tsx        # Video channel, signalling, stats
 │   │   └── components/
+│   │       ├── PCConnector.tsx      # Desktop setup: install + pairing QR
+│   │       ├── PairPrompt.tsx       # Phone: pairing-code entry
 │   │       ├── ConnectionBar.tsx    # Connect / redirect / status
 │   │       ├── Touchpad.tsx         # Multi-touch trackpad
 │   │       ├── Keyboard.tsx         # Text, keys, macros
@@ -860,11 +978,16 @@ test_mob_ctrl/
 │   │       ├── MediaVolume.tsx      # Volume + transport
 │   │       └── PowerControls.tsx    # Power actions
 │   ├── public/                      # manifest.json, PWA icons
+│   │   ├── install.sh               # macOS / Linux one-line installer
+│   │   └── install.ps1              # Windows one-line installer
 │   └── out/                         # Build output — served by the server
 │
 ├── server/                          # FastAPI server (runs on the host)
 │   ├── server.py                    # App, WS endpoint, dispatch, UDP beacon
 │   ├── requirements.txt             # Python dependencies with platform markers
+│   ├── requirements-dev.txt         # pytest, for the test suite
+│   ├── tests/
+│   │   └── test_pairing.py          # Token, code and origin-policy tests
 │   ├── controllers/
 │   │   ├── mouse.py                 # Move, click, scroll, drag
 │   │   ├── keyboard.py              # Keys, combos, text, unicode
@@ -880,12 +1003,15 @@ test_mob_ctrl/
 │   │   ├── search.py                # Google / URL
 │   │   └── system_info.py           # CPU, RAM, battery
 │   ├── utils/
+│   │   ├── pairing.py               # Tokens, pairing codes, origin policy, QR
 │   │   ├── network.py               # LAN IP detection
 │   │   └── ssl_cert.py              # Self-signed cert generator
+│   ├── config/                      # Pairing token — generated, gitignored
 │   └── certs/                       # Generated at runtime — gitignored
 │
 ├── start-server.bat                 # Windows launcher
 ├── start-server.sh                  # macOS / Linux launcher
+├── ARCHITECTURE.md                  # Design deep-dive and threat model
 ├── DEPLOYMENT.md                    # Vercel deployment walkthrough
 └── README.md
 ```
@@ -894,18 +1020,46 @@ test_mob_ctrl/
 
 ## 🔒 Security Model
 
-> [!WARNING]
-> **SPIDER_CTRL has no authentication.** Anyone who can reach port 8765 on your machine gets full control. Run it only on networks you trust.
+> [!IMPORTANT]
+> **Every connection requires a pairing token.** An unpaired device on your
+> network cannot connect, and cannot run a single command. Pairing is described
+> in [Pairing & Authentication](#-pairing--authentication).
 
-### What's Exposed
+### How access is controlled
 
-- The server binds `0.0.0.0` — every interface, reachable by anything on the network
-- `terminal_execute` runs arbitrary commands as the user running the server
-- `process_kill` can terminate any process that user owns
-- `power_shutdown` and friends need no confirmation at the protocol level
-- `fs_list` browses the entire filesystem (names and metadata only, not contents)
-- CORS is `allow_origins=["*"]`
+| Mechanism | What it stops |
+| --- | --- |
+| **256-bit token on every `/ws`**, compared with `hmac.compare_digest` | Any unpaired device, **including one on loopback** |
+| **Origin port check** on the WebSocket handshake | Hostile web pages and DNS rebinding — an attacker's site is served from `:80`/`:443`, never `:8765` |
+| **`/pair` is loopback-only** | Other devices on the Wi-Fi simply asking for the token |
+| **Exact-match CORS allowlist** | A website you have open *reading* the token — its request comes from loopback too, so the loopback check alone is not enough |
+| **Private Network Access opt-in** | Adds Chrome's own gate in front of the above |
+| **Code expiry, single use, 5-attempt cap** | Brute-forcing the short pairing code |
+
+> [!NOTE]
+> WebSocket handshakes are **not** subject to CORS. That is why the token is
+> required even for connections from `127.0.0.1` — without it, any page you had
+> open could open a socket to the server and take over the machine.
+
+### What a paired device can still do
+
+Pairing is all-or-nothing. Once a device holds the token it can:
+
+- Run arbitrary shell commands as the user running the server (`terminal_execute`)
+- Kill any process that user owns (`process_kill`)
+- Shut down, restart or lock the machine, with no confirmation prompt
+- Browse the filesystem (names and metadata, not contents)
+- Watch the screen
+
+So treat the token like a password, and only pair devices you control.
+
+### Remaining exposure
+
+- The server binds `0.0.0.0` — the port is reachable from the whole subnet, even though connecting requires the token
 - Traffic is plaintext by default (enable TLS with `SPIDER_CTRL_TLS=1`)
+- The UDP beacon on 8766 advertises the server's presence to the subnet
+- There is no per-device revocation — rotating the token drops every device
+- There is no approval prompt on the PC; the token is the only gate
 
 ### Safe Networks
 
@@ -917,6 +1071,7 @@ test_mob_ctrl/
 
 ### Hardening Checklist
 
+- [ ] **Keep the token secret** — anyone holding it has full control; rotate with `/pair/rotate` if a device is lost
 - [ ] **Run only while using it** — the UDP beacon advertises your server to the entire subnet
 - [ ] **Firewall it** — allow 8765/tcp and 8766/udp on private profiles only
 - [ ] **Enable TLS** — `SPIDER_CTRL_TLS=1` encrypts traffic with auto-generated certs
@@ -936,12 +1091,38 @@ The repo's first commit included a self-signed `key.pem`. Those files are no lon
 
 ---
 
+## 🧪 Testing
+
+The pairing layer decides who can drive your machine, so it ships with tests —
+mostly negative ones, because a regression there is a stranger getting a shell.
+
+```bash
+cd server
+venv/bin/pip install -r requirements-dev.txt
+venv/bin/python -m pytest tests/ -v
+```
+
+24 cases in [`tests/test_pairing.py`](server/tests/test_pairing.py) cover:
+
+| Area | Checks |
+| --- | --- |
+| **Token** | Length, stability across restarts, disk persistence, rotation invalidating the old value, rejection of empty/wrong input |
+| **Pairing code** | No ambiguous characters, dash/case tolerance, single use, expiry, destroyed after the attempt cap |
+| **Origin policy** | LAN, loopback and allowlisted origins pass; hostile sites, suffix look-alikes (`…vercel.app.evil.com`), other local ports and non-HTTP schemes are rejected |
+| **QR** | Both the terminal and SVG renderers produce output |
+
+---
+
 ## 🔧 Troubleshooting
 
 | Symptom | Solution |
 | --- | --- |
 | Phone can't reach the server | Confirm both devices are on the same network, then check the firewall — this is nearly always the firewall |
 | `Connection failed` in the app | Is `server.py` running? Does `http://<ip>:8765/health` load in the phone's browser? |
+| Phone keeps asking to pair | The token was rejected — scan the QR again, or use a fresh pairing code from the PC |
+| `Wrong or expired code` | Codes last 10 minutes and work once. Restart the server for a new one |
+| Setup page says "No Server" but it's running | Safari blocks pages from reaching localhost. Use Chrome, or scan the QR printed in the terminal |
+| Want to unpair every device | Restart the server and POST to `/pair/rotate` from the PC, or delete `server/config/pairing.json` |
 | Server prints `127.0.0.1` | No LAN connection detected. Connect to Wi-Fi, or read the IP from `ipconfig` / `ifconfig` |
 | Blank page at `:8765` | Frontend isn't built — `cd frontend && npm run build` |
 | Vercel build fails | Root Directory must be set to `frontend`, not the repo root |
@@ -1049,7 +1230,7 @@ Contributions are welcome! Here's how you can help:
 <details>
 <summary><b>Does SPIDER_CTRL work over the internet?</b></summary>
 
-No, by design. SPIDER_CTRL is meant for local network use only. Exposing it to the internet would be a major security risk since there's no authentication. Use it on your home Wi-Fi, a personal hotspot, or an isolated LAN.
+No, by design. Connections are gated by a pairing token, but the server is still built for a trusted LAN: traffic is plaintext by default and a paired device gets a shell on your machine. Use it on your home Wi-Fi, a personal hotspot, or an isolated LAN. For access from outside, put both devices on a [Tailscale](https://tailscale.com) network and use the Tailscale IP — that works unchanged, rather than port-forwarding this to the internet.
 
 </details>
 

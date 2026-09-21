@@ -51,15 +51,18 @@ On the **"Configure Project"** page, set the following:
 
 ### Step 3 — Environment Variables (Optional)
 
-No environment variables are required for the basic setup. The WebSocket server IP is entered manually in the app's UI.
+None are required for Vercel.
 
-If you want to set a default server IP:
+On the **PC server** side, two variables are worth knowing:
 
-| Key | Value | Example |
+| Key | Purpose | Default |
 | --- | --- | --- |
-| `NEXT_PUBLIC_DEFAULT_SERVER_IP` | Your PC's static LAN IP | `192.168.1.42` |
+| `SPIDER_CTRL_ORIGINS` | Comma-separated list of hosted sites allowed to read `/pair`. Set this if your Vercel URL isn't the default. | `https://spider-ctrl.vercel.app` |
+| `SPIDER_CTRL_NO_BROWSER` | Set to `1` to stop the server opening the setup page on boot (headless installs). | unset |
 
-> This is optional. You can always type the IP manually in the app.
+> ⚠️ `SPIDER_CTRL_ORIGINS` must list exact origins. The `/pair` response carries
+> the pairing token, so a wildcard here would let any site that the user visits
+> read it and take over the machine.
 
 ---
 
@@ -158,13 +161,39 @@ New-NetFirewallRule -DisplayName "SPIDER_CTRL Discovery" -Direction Inbound -Pro
 
 ## Part 3: Connect Phone to PC
 
-### Both on Same Wi-Fi
+Every device pairs once. Pairing hands the phone a token it stores and reuses,
+so this only happens the first time.
+
+### Fastest: open the site on the PC
+
+1. Open `https://spider-ctrl.vercel.app` **on the PC itself**
+2. It detects the running server and shows a **QR code** — if the server isn't
+   installed yet, it shows the one-line install command instead
+3. Scan the QR with your phone's camera and open the link
+4. Done — the QR carries the token, so the phone pairs and connects itself ✅
+
+> The page finds the server by asking `http://127.0.0.1:8765/pair`. Chrome,
+> Edge and Firefox allow this; Safari blocks it, so in Safari use the QR code
+> the server prints in its terminal instead.
+
+### No camera: pairing code
+
+1. Open the address the server printed (e.g. `http://192.168.1.42:8765`)
+2. Enter the six-character code shown on the PC
+3. Status turns green → you're in! ✅
+
+The code works once and expires after ten minutes. Restart the server for a
+fresh one.
+
+### From the deployed site on the phone
 
 1. Open `https://spider-ctrl.vercel.app` on your phone
-2. Tap the connection bar → expand it
-3. Enter your PC's IP (e.g., `192.168.1.42`)
-4. Tap **Connect**
-5. Status turns green → you're in! ✅
+2. Expand the connection bar, enter the PC's IP, tap **Go**
+3. You land on the PC-served app — pair with the code as above
+
+> The deployed site can't drive the PC directly: an HTTPS page is not allowed
+> to open a plain `ws://` connection to your LAN. It hands off to the server
+> instead, which is why the QR route is smoother.
 
 ### Using PC as Hotspot
 
@@ -226,6 +255,10 @@ Env Variables:      none required
 | Problem | Solution |
 | --- | --- |
 | Vercel build fails | Ensure **Root Directory** is set to `frontend` |
+| Setup page says "No Server" but it is running | Safari blocks page→localhost requests. Use Chrome, or scan the QR from the server's terminal |
+| Phone keeps returning to the pairing screen | The token was rejected. Scan the QR again or use a fresh code |
+| `Wrong or expired code` | Codes last 10 minutes and work once — restart the server for a new one |
+| Unpair every device | Delete `server/config/pairing.json` and restart, or POST `/pair/rotate` from the PC |
 | "Connection failed" on phone | Check both devices are on the same network |
 | Firewall blocking | Allow `python.exe` through Windows Firewall (see Step 3 above) |
 | Can't find PC IP | Look at the server console output when you start `server.py` |

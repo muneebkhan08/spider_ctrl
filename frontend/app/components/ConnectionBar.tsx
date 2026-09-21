@@ -17,8 +17,17 @@ const STORAGE_KEY = "pccontrol_last_ip";
 const SERVER_PORT = 8765;
 
 export default function ConnectionBar() {
-  const { status, serverIp, connect, disconnect, lastError, pcInfo, isDeployed } =
-    useWebSocket();
+  const {
+    status,
+    serverIp,
+    connect,
+    disconnect,
+    lastError,
+    pcInfo,
+    isDeployed,
+    token,
+    forgetPairing,
+  } = useWebSocket();
   const [inputIp, setInputIp] = useState("");
   const [expanded, setExpanded] = useState(false);
 
@@ -179,17 +188,25 @@ export default function ConnectionBar() {
                     // PROTOCOL
                   </p>
                   <p className="text-surface-400 leading-relaxed">
-                    Enter target IP → tap <span className="text-accent">LINK</span> →
-                    redirect to local server → auto-connect.
+                    Fastest: open this site on the target PC and scan the QR code
+                    it shows.
                   </p>
                   <p className="text-surface-500 leading-relaxed">
-                    Both devices must share the same network. Run{" "}
-                    <code className="bg-surface-800 px-1.5 py-0.5 rounded text-accent/80 border border-surface-700/30">
-                      ipconfig
-                    </code>{" "}
-                    on target machine.
+                    Otherwise enter the target IP → tap{" "}
+                    <span className="text-accent">GO</span> → pair with the code
+                    shown on the PC. Both devices must share the same network.
                   </p>
                 </div>
+              )}
+
+              {/* ── Paired: forget this PC ── */}
+              {token && (
+                <button
+                  onClick={forgetPairing}
+                  className="text-[9px] font-mono text-surface-600 hover:text-danger transition-colors tracking-wider"
+                >
+                  // paired — forget this pc
+                </button>
               )}
 
               {/* ── Local: help text ── */}
