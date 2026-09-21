@@ -27,6 +27,9 @@ export default function Touchpad() {
   const lastTouchRef = useRef<{ x: number; y: number } | null>(null);
   const totalMoveRef = useRef(0);
   const [activeFingers, setActiveFingers] = useState(0);
+  // Mirrors activeFingers for reads inside touch handlers, which run more
+  // often than React re-renders.
+  const activeFingersRef = useRef(0);
 
   // ── Handlers ──────────────────────────────
   const handleTouchStart = useCallback(
@@ -34,13 +37,16 @@ export default function Touchpad() {
       if (disabled) return;
       const touch = e.touches[0];
       const fingers = e.touches.length;
+      activeFingersRef.current = fingers;
       setActiveFingers(fingers);
 
       touchStartRef.current = {
         x: touch.clientX,
         y: touch.clientY,
-        time: Date.now(),
-        fingers,
+        time: touchStartRef.current?.time ?? Date.now(),
+        // Remember the most fingers seen: a two-finger tap fires touchstart
+        // twice, and the tap should be judged on the peak, not the first.
+        fingers: Math.max(fingers, touchStartRef.current?.fingers ?? 0),
       };
       lastTouchRef.current = { x: touch.clientX, y: touch.clientY };
       totalMoveRef.current = 0;
@@ -51,10 +57,19 @@ export default function Touchpad() {
   const handleTouchMove = useCallback(
     (e: React.TouchEvent) => {
       if (disabled || !lastTouchRef.current) return;
-      e.preventDefault();
 
       const touch = e.touches[0];
       const fingers = e.touches.length;
+
+      // A finger landing or lifting mid-gesture moves touches[0], which would
+      // read as one huge jump. Re-anchor and skip this frame instead.
+      if (fingers !== activeFingersRef.current) {
+        activeFingersRef.current = fingers;
+        setActiveFingers(fingers);
+        lastTouchRef.current = { x: touch.clientX, y: touch.clientY };
+        return;
+      }
+
       const dx = (touch.clientX - lastTouchRef.current.x) * SENSITIVITY;
       const dy = (touch.clientY - lastTouchRef.current.y) * SENSITIVITY;
 
@@ -94,10 +109,17 @@ export default function Touchpad() {
         }
       }
 
+      activeFingersRef.current = e.touches.length;
       setActiveFingers(e.touches.length);
       if (e.touches.length === 0) {
         touchStartRef.current = null;
         lastTouchRef.current = null;
+      } else if (lastTouchRef.current) {
+        // Re-anchor to the finger that is still down.
+        lastTouchRef.current = {
+          x: e.touches[0].clientX,
+          y: e.touches[0].clientY,
+        };
       }
     },
     [disabled, send]

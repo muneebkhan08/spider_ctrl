@@ -39,6 +39,7 @@ const WSContext = createContext<WSContextValue | null>(null);
 // ── Provider ────────────────────────────────────────────────────────────────
 const SERVER_PORT = 8765;
 const RECONNECT_DELAY = 3000;
+const REQUEST_TIMEOUT = 35000;
 
 /**
  * Detect if running on the Vercel-deployed site (or any external host).
@@ -72,6 +73,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [isDeployed, setIsDeployed] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const manualDisconnectRef = useRef(false);
   const pendingRef = useRef<Map<string, (data: unknown) => void>>(new Map());
   const idCounterRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -96,6 +98,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const connect = useCallback(
     (ip: string) => {
       cleanup();
+      manualDisconnectRef.current = false;
       setServerIp(ip);
       setLastError(null);
       setStatus("connecting");
@@ -103,7 +106,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       // If the IP already contains a port (e.g. "192.168.1.5:8765"), use as-is
       // Otherwise append the default server port
       const host = ip.includes(":") ? ip : `${ip}:${SERVER_PORT}`;
-      const url = `ws://${host}/ws`;
+      // An https page can only open wss:// — ws:// is blocked as mixed content.
+      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+      const url = `${scheme}://${host}/ws`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
@@ -118,10 +123,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          // Handle pending request-response
+          // Handle pending request-response. A failed handler comes back as
+          // {ok: false, error}, with no `data` — pass the error through so
+          // callers can show it rather than silently receiving undefined.
           if (data.id && pendingRef.current.has(data.id)) {
-            pendingRef.current.get(data.id)!(data.data);
+            const settle = pendingRef.current.get(data.id)!;
             pendingRef.current.delete(data.id);
+            settle(data.ok === false ? { error: data.error } : data.data);
           }
           // Capture system info
           if (data.id?.startsWith("__init_") && data.data) {
@@ -135,7 +143,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       ws.onclose = () => {
         setStatus("disconnected");
         // Only auto-reconnect when served from the PC server (same origin)
-        if (ip && !checkIsDeployed()) {
+        if (ip && !manualDisconnectRef.current && !checkIsDeployed()) {
           reconnectTimerRef.current = setTimeout(() => connect(ip), RECONNECT_DELAY);
         }
       };
@@ -148,6 +156,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   );
 
   const disconnect = useCallback(() => {
+    manualDisconnectRef.current = true;
     cleanup();
     setStatus("disconnected");
     setServerIp("");
@@ -171,16 +180,18 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           return;
         }
         const id = `req_${++idCounterRef.current}_${Date.now()}`;
-        pendingRef.current.set(id, resolve);
-        ws.send(JSON.stringify({ action, payload, id }));
 
         // Timeout after 35 s (covers terminal commands with 30s default timeout)
-        setTimeout(() => {
-          if (pendingRef.current.has(id)) {
-            pendingRef.current.delete(id);
-            resolve(null);
-          }
-        }, 35000);
+        const timer = setTimeout(() => {
+          pendingRef.current.delete(id);
+          resolve(null);
+        }, REQUEST_TIMEOUT);
+
+        pendingRef.current.set(id, (data) => {
+          clearTimeout(timer);
+          resolve(data);
+        });
+        ws.send(JSON.stringify({ action, payload, id }));
       });
     },
     []

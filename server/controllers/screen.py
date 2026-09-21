@@ -61,6 +61,9 @@ class QualityProfile:
         return 1.0 / self.fps
 
 
+# RTP video clock rate — the conventional fixed timebase for video streams.
+VIDEO_CLOCK_RATE = 90_000
+
 QUALITY_PRESETS: Dict[QualityPreset, QualityProfile] = {
     QualityPreset.LOW: QualityProfile(width=640, height=360, fps=15, bitrate=500),
     QualityPreset.MEDIUM: QualityProfile(width=960, height=540, fps=24, bitrate=1200),
@@ -92,6 +95,9 @@ class ScreenCaptureTrack(MediaStreamTrack):
         self._started = False
         self._frame_count = 0
         self._start_time: Optional[float] = None
+        # Standard 90 kHz video clock. Fixed, so that switching quality
+        # presets (and thus fps) never reinterprets timestamps already sent.
+        self._time_base = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 
         # Frame exchange
         self._latest_frame: Optional[av.VideoFrame] = None
@@ -176,21 +182,25 @@ class ScreenCaptureTrack(MediaStreamTrack):
                     # BGRA → BGR (drop alpha)
                     img_bgr = img[:, :, :3]
 
-                    # Resize to target resolution
+                    # Resize to target resolution, preserving aspect ratio
                     q = self._quality
                     src_h, src_w = img_bgr.shape[:2]
+                    dst_w, dst_h = self._fit_within(src_w, src_h, q.width, q.height)
 
-                    if src_w != q.width or src_h != q.height:
+                    if src_w != dst_w or src_h != dst_h:
                         # Fast resize using numpy slicing + simple downscale
-                        img_bgr = self._fast_resize(img_bgr, q.width, q.height)
+                        img_bgr = self._fast_resize(img_bgr, dst_w, dst_h)
 
                     # BGR → RGB for av
                     img_rgb = img_bgr[:, :, ::-1].copy()
 
                     # Create av.VideoFrame
                     frame = av.VideoFrame.from_ndarray(img_rgb, format="rgb24")
-                    frame.pts = self._frame_count
-                    frame.time_base = fractions.Fraction(1, q.fps)
+                    if self._start_time is None:
+                        self._start_time = loop_start
+                    elapsed = loop_start - self._start_time
+                    frame.pts = int(elapsed * VIDEO_CLOCK_RATE)
+                    frame.time_base = self._time_base
 
                     with self._frame_lock:
                         self._latest_frame = frame
@@ -210,6 +220,25 @@ class ScreenCaptureTrack(MediaStreamTrack):
                     self._stop_event.wait(sleep_time)
 
         logger.info("Capture thread stopped")
+
+    @staticmethod
+    def _fit_within(
+        src_w: int, src_h: int, box_w: int, box_h: int
+    ) -> tuple[int, int]:
+        """
+        Largest size with the source's aspect ratio that fits in the preset's
+        box. Scaling straight to the preset dimensions would stretch the
+        picture on any monitor that isn't 16:9 (e.g. 16:10 or portrait).
+
+        Both dimensions are rounded down to even numbers — H.264 chroma
+        subsampling requires it.
+        """
+        if src_w <= 0 or src_h <= 0:
+            return box_w, box_h
+        scale = min(box_w / src_w, box_h / src_h)
+        width = max(2, int(src_w * scale) & ~1)
+        height = max(2, int(src_h * scale) & ~1)
+        return width, height
 
     @staticmethod
     def _fast_resize(img: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
@@ -256,7 +285,7 @@ class ScreenCaptureTrack(MediaStreamTrack):
                 format="rgb24",
             )
             frame.pts = 0
-            frame.time_base = fractions.Fraction(1, self._quality.fps)
+            frame.time_base = self._time_base
 
         return frame
 
@@ -285,7 +314,8 @@ class ScreenController:
         RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
         RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
         RTCIceServer(urls=["stun:stun2.l.google.com:19302"]),
-        RTCIceServer(urls=["stun:stun.stunprotocol.org:3478"]),
+        RTCIceServer(urls=["stun:stun3.l.google.com:19302"]),
+        RTCIceServer(urls=["stun:stun4.l.google.com:19302"]),
     ]
 
     def __init__(self):

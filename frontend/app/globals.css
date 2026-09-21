@@ -1,8 +1,10 @@
+/* @import must come before every other rule or the browser drops it —
+   Tailwind's directives expand into rules, so this has to stay on top. */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap");
 
 :root {
   --color-accent: #00ffc8;

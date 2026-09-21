@@ -5,10 +5,14 @@ Browse directories, read file metadata, and navigate the file system.
 Does NOT allow reading file contents or deleting files — this is a
 browser only, for safety.
 
-Security:
+Scope:
   • Read-only — no create, delete, move, or write operations
-  • Hidden/system files excluded by default
-  • Path traversal sanitised
+  • File *contents* are never returned, only names and metadata
+  • Hidden/system files excluded unless show_hidden is set
+
+Note: any path on the host is browsable — there is no root jail. The
+WebSocket API this is exposed through is unauthenticated, so only run the
+server on a network you trust. See the Security section of the README.
 """
 
 import os
@@ -17,7 +21,6 @@ import shutil
 import stat
 import string
 from datetime import datetime
-from typing import Optional
 
 
 class FilesystemController:

@@ -1,12 +1,14 @@
 """
 Self-signed SSL certificate generator.
-Auto-creates cert.pem + key.pem on first run so the server can serve HTTPS/WSS.
-Regenerates if the local IP changes (SAN must match).
+Creates cert.pem + key.pem so the server can serve HTTPS/WSS, regenerating
+them whenever the local IP changes (the SAN has to match).
+
+Wired into server.py — enable TLS by setting the SPIDER_CTRL_TLS=1
+environment variable. See the README for details.
 """
 
 import datetime
 import ipaddress
-import os
 import json
 from pathlib import Path
 
@@ -19,6 +21,11 @@ CERT_DIR = Path(__file__).parent.parent / "certs"
 CERT_FILE = CERT_DIR / "cert.pem"
 KEY_FILE = CERT_DIR / "key.pem"
 META_FILE = CERT_DIR / "cert_meta.json"
+
+
+def _utcnow() -> datetime.datetime:
+    """Naive UTC timestamp (what x509 builders expect)."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
 def _needs_regeneration(local_ip: str) -> bool:
@@ -73,8 +80,8 @@ def ensure_ssl_certs(local_ip: str) -> tuple[str, str]:
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.utcnow())
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=825))
+        .not_valid_before(_utcnow())
+        .not_valid_after(_utcnow() + datetime.timedelta(days=825))
         .add_extension(
             x509.SubjectAlternativeName(san_entries),
             critical=False,

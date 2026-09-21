@@ -1,14 +1,19 @@
 """
 Remote Terminal Controller
 ==========================
-Executes shell commands asynchronously via subprocess and returns
-stdout/stderr output. Uses asyncio subprocess to avoid blocking
-the main event loop.
+Executes shell commands via subprocess and returns stdout/stderr.
+Calls are synchronous; server.py dispatches them through
+asyncio.to_thread so the event loop is never blocked.
 
-Security:
-  • Commands run in a subprocess with a hard timeout (30s default)
-  • Output is capped at 64 KB to prevent memory exhaustion
-  • Working directory is tracked per-session
+Limits:
+  • Commands run in a subprocess with a hard timeout (30s default, 120s max)
+  • Output is capped at 64 KB per stream to prevent memory exhaustion
+  • Working directory is tracked per-session so `cd` persists
+
+Note: this is a full shell with the privileges of the user running the
+server, and the WebSocket API it is exposed through is unauthenticated.
+Only run the server on a network you trust. See the README's Security
+section.
 """
 
 import os
@@ -31,7 +36,6 @@ class TerminalController:
 
     def __init__(self):
         self._cwd: str = self._default_cwd()
-        self._shell = "powershell.exe" if platform.system() == "Windows" else "/bin/bash"
 
     @staticmethod
     def _default_cwd() -> str:

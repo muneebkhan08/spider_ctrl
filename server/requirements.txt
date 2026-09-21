@@ -1,13 +1,24 @@
+# ── Web server ───────────────────────────────────────────────────────────
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 websockets==12.0
+
+# ── Input / system control ───────────────────────────────────────────────
 pyautogui==0.9.54
-pycaw==20230407
-comtypes==1.2.0
 psutil==5.9.6
 screeninfo==0.8.1
-cryptography>=41.0.0
+
+# Windows-only audio stack (pycaw drives Core Audio through COM).
+# macOS uses osascript and Linux uses pactl, so these must not be
+# installed — and cannot be imported — anywhere else.
+pycaw==20230407; sys_platform == "win32"
+comtypes==1.2.0; sys_platform == "win32"
+
+# ── Screen streaming (WebRTC) ────────────────────────────────────────────
 aiortc>=1.9.0
+av>=12.0.0
 mss>=9.0.0
 numpy>=1.24.0
-av>=12.0.0
+
+# ── TLS certificate generation (see utils/ssl_cert.py) ───────────────────
+cryptography>=41.0.0

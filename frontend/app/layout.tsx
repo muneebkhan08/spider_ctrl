@@ -5,7 +5,18 @@ export const metadata: Metadata = {
   title: "SPIDER_CTRL // Remote Access",
   description: "Advanced remote system control interface",
   manifest: "/manifest.json",
-  icons: { apple: "/icon-192.png" },
+  appleWebApp: {
+    capable: true,
+    title: "SPIDER_CTRL",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "32x32" },
+      { url: "/icon-192.png", type: "image/png", sizes: "192x192" },
+    ],
+    apple: "/icon-192.png",
+  },
 };
 
 export const viewport: Viewport = {

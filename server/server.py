@@ -34,6 +34,7 @@ from controllers.terminal import TerminalController
 from controllers.processes import ProcessController
 from controllers.filesystem import FilesystemController
 from utils.network import get_local_ip
+from utils.ssl_cert import ensure_ssl_certs
 
 # Configure logging for WebRTC
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +46,12 @@ UDP_PORT = 8766
 BROADCAST_INTERVAL = 2  # seconds
 APP_NAME = "SPIDER_CTRL Server"
 PROTOCOL_VERSION = "1.0.0"
+
+# Static frontend produced by `next build` (output: "export")
+FRONTEND_DIR = (Path(__file__).parent.parent / "frontend" / "out").resolve()
+
+# TLS opt-in: set SPIDER_CTRL_TLS=1 to serve over HTTPS/WSS
+ENABLE_TLS = os.environ.get("SPIDER_CTRL_TLS", "").lower() in ("1", "true", "yes")
 
 
 # ── Controller Instances ─────────────────────────────────────────────────────
@@ -158,15 +165,18 @@ async def lifespan(app: FastAPI):
     t.start()
     local_ip = get_local_ip()
     has_frontend = FRONTEND_DIR.exists()
+    http_proto = "https" if ENABLE_TLS else "http"
+    ws_proto = "wss" if ENABLE_TLS else "ws"
     print("\n" + "═" * 56)
     print(f"  🖥️  {APP_NAME} v{PROTOCOL_VERSION}")
     if has_frontend:
-        print(f"  🌐  Open on phone → http://{local_ip}:{SERVER_PORT}")
+        print(f"  🌐  Open on phone → {http_proto}://{local_ip}:{SERVER_PORT}")
     else:
         print(f"  ⚠️  Frontend not built — run: cd frontend && npm run build")
-    print(f"  🔌  WebSocket  →  ws://{local_ip}:{SERVER_PORT}/ws")
-    print(f"  �  WebRTC     →  /webrtc/offer")
+    print(f"  🔌  WebSocket  →  {ws_proto}://{local_ip}:{SERVER_PORT}/ws")
+    print(f"  🎥  WebRTC     →  /webrtc/offer")
     print(f"  📡  UDP Disco   →  port {UDP_PORT}")
+    print(f"  🔒  TLS         →  {'enabled' if ENABLE_TLS else 'disabled (set SPIDER_CTRL_TLS=1)'}")
     print(f"  💻  Platform    →  {platform.system()} {platform.release()}")
     print("═" * 56 + "\n")
     yield
@@ -296,10 +306,6 @@ async def webrtc_stats(connection_id: str):
     return JSONResponse(result)
 
 
-# ── Static Frontend Serving ──────────────────────────────────────────────────
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "out"
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
@@ -349,15 +355,30 @@ async def websocket_endpoint(ws: WebSocket):
 # ── Serve Frontend ───────────────────────────────────────────────────────────
 if FRONTEND_DIR.exists():
     # Serve Next.js static export from /frontend/out
+    def _safe_path(rel: str) -> Path | None:
+        """
+        Resolve `rel` inside FRONTEND_DIR, or return None if it escapes.
+
+        Uvicorn hands us the raw request target, so "../../secret" would
+        otherwise walk out of the export directory.
+        """
+        try:
+            candidate = (FRONTEND_DIR / rel).resolve()
+        except (OSError, ValueError):
+            return None
+        if candidate != FRONTEND_DIR and FRONTEND_DIR not in candidate.parents:
+            return None
+        return candidate if candidate.is_file() else None
+
     @app.get("/{path:path}")
     async def serve_frontend(path: str):
         """Serve the static frontend. Falls back to index.html for SPA routing."""
-        file_path = FRONTEND_DIR / path
-        if file_path.is_file():
+        file_path = _safe_path(path)
+        if file_path:
             return FileResponse(file_path)
         # Try .html extension (Next.js exports pages as page.html)
-        html_path = FRONTEND_DIR / f"{path}.html"
-        if html_path.is_file():
+        html_path = _safe_path(f"{path}.html")
+        if html_path:
             return FileResponse(html_path)
         # Fallback to index.html
         index_path = FRONTEND_DIR / "index.html"
@@ -378,10 +399,17 @@ else:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    uvicorn.run(
-        "server:app",
+    run_kwargs = dict(
         host="0.0.0.0",
         port=SERVER_PORT,
         log_level="warning",
         reload=False,
     )
+
+    if ENABLE_TLS:
+        cert_path, key_path = ensure_ssl_certs(get_local_ip())
+        run_kwargs["ssl_certfile"] = cert_path
+        run_kwargs["ssl_keyfile"] = key_path
+
+    uvicorn.run("server:app", **run_kwargs)
+

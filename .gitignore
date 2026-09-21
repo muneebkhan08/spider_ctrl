@@ -1,19 +1,26 @@
-# Python
+# ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
 dist/
 venv/
+.venv/
 .env
 
-# Certs (keep meta only)
+# ── Certificates ─────────────────────────────────────────────────────────
+# Generated per-machine by utils/ssl_cert.py. Never commit the key.
 server/certs/*.pem
 server/certs/*.key
+server/certs/cert_meta.json
 
-# Node
+# ── Node / Next.js ───────────────────────────────────────────────────────
 node_modules/
 .next/
+# Static export consumed by the Python server — a build artifact.
+frontend/out/
+next-env.d.ts
+*.tsbuildinfo
 
-# OS
+# ── OS ───────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

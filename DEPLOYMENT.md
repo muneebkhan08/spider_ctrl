@@ -10,7 +10,7 @@ Complete step-by-step guide to deploy the frontend on **Vercel** and run the bac
 
 - A [GitHub](https://github.com) account
 - A [Vercel](https://vercel.com) account (free tier works)
-- Repository pushed to GitHub (already done → `muneebkhan08/mob_ctrl`)
+- Repository pushed to GitHub (already done → `muneebkhan08/test_mob_ctrl`)
 
 ---
 
@@ -18,7 +18,7 @@ Complete step-by-step guide to deploy the frontend on **Vercel** and run the bac
 
 1. Go to [vercel.com/dashboard](https://vercel.com/dashboard)
 2. Click **"Add New…"** → **"Project"**
-3. Under **"Import Git Repository"**, find and select **`muneebkhan08/mob_ctrl`**
+3. Under **"Import Git Repository"**, find and select **`muneebkhan08/test_mob_ctrl`**
 4. Click **"Import"**
 
 ---
@@ -118,14 +118,17 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Or simply double-click **`start-server.bat`** from the project root.
+Or simply double-click **`start-server.bat`** from the project root
+(macOS/Linux: run `./start-server.sh`).
 
 You'll see:
 
 ```text
 ════════════════════════════════════════════════════════
   🖥️  SPIDER_CTRL Server v1.0.0
-  🌐  WebSocket  →  ws://192.168.1.42:8765/ws
+  🌐  Open on phone → http://192.168.1.42:8765
+  🔌  WebSocket  →  ws://192.168.1.42:8765/ws
+  🎥  WebRTC     →  /webrtc/offer
   📡  UDP Disco   →  port 8766
   💻  Platform    →  Windows 10
 ════════════════════════════════════════════════════════
@@ -141,14 +144,14 @@ If your phone can't connect, Windows Firewall may be blocking the server:
 2. Click **"Allow an app or feature through Windows Defender Firewall"**
 3. Click **"Change settings"** → **"Allow another app…"**
 4. Browse to `server\venv\Scripts\python.exe`
-5. Check both **Private** and **Public** networks
+5. Check **Private** only — never Public
 6. Click **OK**
 
 Alternatively, run in an elevated PowerShell:
 
 ```powershell
-New-NetFirewallRule -DisplayName "SPIDER_CTRL Server" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow
-New-NetFirewallRule -DisplayName "SPIDER_CTRL Discovery" -Direction Inbound -Protocol UDP -LocalPort 8766 -Action Allow
+New-NetFirewallRule -DisplayName "SPIDER_CTRL Server" -Direction Inbound -Protocol TCP -LocalPort 8765 -Profile Private -Action Allow
+New-NetFirewallRule -DisplayName "SPIDER_CTRL Discovery" -Direction Inbound -Protocol UDP -LocalPort 8766 -Profile Private -Action Allow
 ```
 
 ---

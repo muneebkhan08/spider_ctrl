@@ -1,6 +1,10 @@
 """Keyboard controller — press keys, combos, type text."""
 
+import platform
+
 import pyautogui
+
+from .clipboard import ClipboardController
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
@@ -42,8 +46,18 @@ class KeyboardController:
         "pause": "pause",
     }
 
+    # On macOS the "Windows/Super" key is Command, and Ctrl-shortcuts are
+    # Command-shortcuts; pyautogui names that key "command".
+    MAC_OVERRIDES = {"win": "command", "ctrl": "command"}
+
+    def __init__(self):
+        self._is_mac = platform.system() == "Darwin"
+
     def _resolve_key(self, key: str) -> str:
-        return self.KEY_MAP.get(key.lower(), key)
+        resolved = self.KEY_MAP.get(key.lower(), key)
+        if self._is_mac:
+            resolved = self.MAC_OVERRIDES.get(resolved, resolved)
+        return resolved
 
     def press(self, key: str = "", **_):
         """Press a single key."""
@@ -61,17 +75,21 @@ class KeyboardController:
 
     def type_text(self, text: str = "", **_):
         """Type a string of text."""
-        pyautogui.typewrite(text, interval=0.02) if text.isascii() else self._type_unicode(text)
+        if not text:
+            return {"typed": 0}
+        if text.isascii():
+            pyautogui.typewrite(text, interval=0.02)
+        else:
+            self._type_unicode(text)
         return {"typed": len(text)}
 
-    @staticmethod
-    def _type_unicode(text: str):
-        """Handle non-ASCII text via clipboard paste."""
-        import subprocess
-        # Escape single quotes for PowerShell
-        safe = text.replace("'", "''")
-        subprocess.run(
-            ["powershell", "-command", f"Set-Clipboard -Value '{safe}'"],
-            capture_output=True,
-        )
-        pyautogui.hotkey("ctrl", "v")
+    def _type_unicode(self, text: str):
+        """
+        pyautogui cannot synthesise non-ASCII characters, so route them
+        through the clipboard and paste instead.
+        """
+        result = ClipboardController().set_text(text)
+        if result.get("error"):
+            raise RuntimeError(f"Cannot type unicode text: {result['error']}")
+        modifier = "command" if self._is_mac else "ctrl"
+        pyautogui.hotkey(modifier, "v")

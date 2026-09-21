@@ -88,13 +88,21 @@ export function WebRTCProvider({ children }: { children: ReactNode }) {
   const currentQualityRef = useRef<QualityPreset>("medium");
   const connectionIdRef = useRef<string | null>(null);
   const isStoppingRef = useRef(false);
+  // Candidates gathered before /webrtc/offer answers, which is when we
+  // learn the connection_id they have to be addressed to.
+  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
 
   // ── Server URL builder ────────────────────────────────────────────────
 
   const getServerUrl = useCallback(() => {
     if (!serverIp) return null;
     const host = serverIp.includes(":") ? serverIp : `${serverIp}:8765`;
-    return `http://${host}`;
+    // Match the page's scheme — an https page cannot fetch http (mixed content).
+    const scheme =
+      typeof window !== "undefined" && window.location.protocol === "https:"
+        ? "https"
+        : "http";
+    return `${scheme}://${host}`;
   }, [serverIp]);
 
   // ── Stats collection ──────────────────────────────────────────────────
@@ -223,6 +231,7 @@ export function WebRTCProvider({ children }: { children: ReactNode }) {
       }
 
       isStoppingRef.current = false;
+      pendingCandidatesRef.current = [];
       setStreamError(null);
       setStreamStatus("connecting");
       currentQualityRef.current = quality;
@@ -284,24 +293,36 @@ export function WebRTCProvider({ children }: { children: ReactNode }) {
         await pc.setLocalDescription(offer);
 
         // Trickle ICE candidates to server
-        pc.onicecandidate = async (event) => {
-          if (event.candidate && connectionIdRef.current) {
-            try {
-              await fetch(`${baseUrl}/webrtc/ice`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  connection_id: connectionIdRef.current,
-                  candidate: {
-                    candidate: event.candidate.candidate,
-                    sdpMid: event.candidate.sdpMid,
-                    sdpMLineIndex: event.candidate.sdpMLineIndex,
-                  },
-                }),
-              });
-            } catch {
-              // ICE candidate send failure is non-fatal
-            }
+        const postCandidate = async (candidate: RTCIceCandidateInit) => {
+          if (!connectionIdRef.current) return;
+          try {
+            await fetch(`${baseUrl}/webrtc/ice`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                connection_id: connectionIdRef.current,
+                candidate,
+              }),
+            });
+          } catch {
+            // ICE candidate send failure is non-fatal
+          }
+        };
+
+        pc.onicecandidate = (event) => {
+          if (!event.candidate) return;
+          const candidate: RTCIceCandidateInit = {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+          };
+          // Gathering starts at setLocalDescription, before the offer POST
+          // resolves. Queue anything that arrives in that window instead of
+          // dropping it, or the connection can fail to establish.
+          if (connectionIdRef.current) {
+            postCandidate(candidate);
+          } else {
+            pendingCandidatesRef.current.push(candidate);
           }
         };
 
@@ -328,6 +349,11 @@ export function WebRTCProvider({ children }: { children: ReactNode }) {
 
         connectionIdRef.current = answer.connection_id;
         setConnectionId(answer.connection_id);
+
+        // Flush anything gathered while the offer was in flight.
+        const queued = pendingCandidatesRef.current;
+        pendingCandidatesRef.current = [];
+        queued.forEach((candidate) => postCandidate(candidate));
 
         // Set remote description (server's answer)
         await pc.setRemoteDescription(
@@ -388,6 +414,7 @@ export function WebRTCProvider({ children }: { children: ReactNode }) {
 
     cleanup();
     connectionIdRef.current = null;
+    pendingCandidatesRef.current = [];
     setConnectionId(null);
     setStreamStatus("idle");
     setStreamStats(DEFAULT_STATS);
